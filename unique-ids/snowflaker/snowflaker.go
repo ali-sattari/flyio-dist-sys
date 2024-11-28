@@ -27,7 +27,7 @@ type ID int64
 
 func New(nId int64) (Generator, error) {
 	if nId == 0 || nId > maxNodeID {
-		return Generator{}, fmt.Errorf("invalid machine ID needs to be 10 bits uint: %+v", nId)
+		return Generator{}, fmt.Errorf("invalid machine ID needs to be 10 bits uint: %d > %d", nId, maxNodeID)
 	}
 
 	return Generator{

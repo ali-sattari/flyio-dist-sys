@@ -11,4 +11,4 @@
 
 run: .go-build
 	@echo "Running $(CHALLENGE)..."
-	maelstrom test -w $(CHALLENGE) --bin ./bin/$(CHALLENGE) --node-count 1 --time-limit 10
+	maelstrom test -w $(CHALLENGE) --bin ./bin/$(CHALLENGE) --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition

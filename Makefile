@@ -1,9 +1,9 @@
 CHALLENGES = echo unique-ids broadcast g-counter kafka txn
-
-.go-build: 
-	@echo "Building $(CHALLENGE)..."
+BIN = ./bin/app
+.go-build:
+	@echo "Building..."
 	@mkdir -p bin
-	@go build -o ./bin/$(CHALLENGE) ./$(CHALLENGE)
+	@go build -o ./bin/app .
 
 
 run:
@@ -17,17 +17,17 @@ run-%:
 	@echo "Running $(CHALLENGE)..."
 
 	@if [ "$(CHALLENGE)" = "echo" ]; then \
-		maelstrom test -w $(CHALLENGE) --bin ./bin/$(CHALLENGE) --node-count 1 --time-limit 10; \
+		maelstrom test -w $(CHALLENGE) --bin $(BIN) --node-count 1 --time-limit 10; \
 	elif [ "$(CHALLENGE)" = "unique-ids" ]; then \
-		maelstrom test -w $(CHALLENGE) --bin ./bin/$(CHALLENGE) --node-count 3 --time-limit 30 --rate 1000 --availability total --nemesis partition; \
+		maelstrom test -w $(CHALLENGE) --bin $(BIN) --node-count 3 --time-limit 30 --rate 1000 --availability total --nemesis partition; \
 	elif [ "$(CHALLENGE)" = "broadcast" ]; then \
-		maelstrom test -w $(CHALLENGE) --bin ./bin/$(CHALLENGE) --node-count 1 --time-limit 20 --rate 10; \
+		maelstrom test -w $(CHALLENGE) --bin $(BIN) --node-count 1 --time-limit 20 --rate 10; \
 	elif [ "$(CHALLENGE)" = "g-counter" ]; then \
-		maelstrom test -w $(CHALLENGE) --bin ./bin/$(CHALLENGE) --node-count 3 --rate 100 --time-limit 20 --nemesis partition; \
+		maelstrom test -w $(CHALLENGE) --bin $(BIN) --node-count 3 --rate 100 --time-limit 20 --nemesis partition; \
 	elif [ "$(CHALLENGE)" = "kafka" ]; then \
-		maelstrom test -w $(CHALLENGE) --bin ./bin/$(CHALLENGE) --node-count 1 --rate 1000 --time-limit 20 --concurrency 2n; \
+		maelstrom test -w $(CHALLENGE) --bin $(BIN) --node-count 1 --rate 1000 --time-limit 20 --concurrency 2n; \
 	elif [ "$(CHALLENGE)" = "txn" ]; then \
-		maelstrom test -w txn-rw-register --bin ./bin/$(CHALLENGE) --node-count 1 --rate 1000 --time-limit 20 --concurrency 2n --consistency-models read-uncommitted --availability total; \
+		maelstrom test -w txn-rw-register --bin $(BIN) --node-count 1 --rate 1000 --time-limit 20 --concurrency 2n --consistency-models read-uncommitted --availability total; \
 	fi
 
 .PHONY: run run-%

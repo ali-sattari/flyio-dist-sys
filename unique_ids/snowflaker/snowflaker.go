@@ -20,7 +20,7 @@ type Generator struct {
 	nodeid        int64
 	sequence      int64
 	lastTimeStamp int64
-	mtx           sync.Mutex
+	mtx           *sync.Mutex
 }
 
 type ID int64
@@ -34,6 +34,7 @@ func New(nId int64) (Generator, error) {
 		nodeid:        nId,
 		sequence:      0,
 		lastTimeStamp: getTimeMs(),
+		mtx:           &sync.Mutex{},
 	}, nil
 }
 

@@ -27,9 +27,10 @@ func main() {
 
 	// broadcast
 	brdc := broadcast.New(n)
-	n.Handle("broadcast", brdc.Handle("broadcast"))
-	n.Handle("read", brdc.Handle("read"))
-	n.Handle("topology", brdc.Handle("topology"))
+	n.Handle("broadcast", brdc.GetHandle("broadcast"))
+	n.Handle("broadcast_ok", brdc.GetHandle("broadcast_ok"))
+	n.Handle("read", brdc.GetHandle("read"))
+	n.Handle("topology", brdc.GetHandle("topology"))
 
 	if err := n.Run(); err != nil {
 		log.Printf("ERROR: %s", err)

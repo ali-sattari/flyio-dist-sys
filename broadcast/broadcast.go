@@ -2,7 +2,6 @@ package broadcast
 
 import (
 	"encoding/json"
-	"log"
 	"sync"
 	"time"
 
@@ -24,7 +23,7 @@ type sentLog struct {
 	msg   int64
 }
 
-type Workload struct {
+type workload struct {
 	maelstrom.MessageBody
 	Type     string
 	Message  int64
@@ -44,7 +43,7 @@ func New(n *maelstrom.Node) Program {
 
 func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 	return func(msg maelstrom.Message) error {
-		var body Workload
+		var body workload
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
@@ -67,14 +66,13 @@ func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 
 }
 
-func (p *Program) broadcast(body Workload) map[string]any {
+func (p *Program) broadcast(body workload) map[string]any {
 	m := body.Message
 	resp := map[string]any{
 		"type": "broadcast_ok",
 	}
 
 	if p.haveMessage(m) {
-		log.Printf("already have message %d, ignoring: %+v", m, body)
 		return resp
 	}
 
@@ -86,7 +84,7 @@ func (p *Program) broadcast(body Workload) map[string]any {
 	return resp
 }
 
-func (p *Program) read(body Workload) map[string]any {
+func (p *Program) read(body workload) map[string]any {
 	p.mtx.RLock()
 	defer p.mtx.RUnlock()
 	resp := map[string]any{
@@ -96,7 +94,7 @@ func (p *Program) read(body Workload) map[string]any {
 	return resp
 }
 
-func (p *Program) topology(body Workload) map[string]any {
+func (p *Program) topology(body workload) map[string]any {
 	p.topo = body.Topology
 	resp := map[string]any{
 		"type": "topology_ok",
@@ -104,11 +102,11 @@ func (p *Program) topology(body Workload) map[string]any {
 	return resp
 }
 
-func (p *Program) gossip(msg int64, body Workload) {
+func (p *Program) gossip(msg int64, body workload) {
 	targets := p.topo[p.node.ID()]
 
 	for _, t := range targets {
-		p.node.Send(t, Workload{
+		p.node.Send(t, workload{
 			Type:    "broadcast",
 			Message: msg,
 		})
@@ -143,7 +141,7 @@ func (p *Program) addSentLog(node string, id int, msg int64) {
 	)
 }
 
-func (p *Program) ackSentLog(src string, body Workload) {
+func (p *Program) ackSentLog(src string, body workload) {
 	p.ackMtx.Lock()
 	defer p.ackMtx.Unlock()
 	id := body.InReplyTo
@@ -174,7 +172,7 @@ func (p *Program) resendUnackedLog() {
 				for n, sl := range p.sent {
 					for _, l := range sl {
 						if time.Since(time.UnixMicro(l.at)) >= time.Second {
-							p.node.Send(n, Workload{
+							p.node.Send(n, workload{
 								Type:    "broadcast",
 								Message: l.msg,
 							})

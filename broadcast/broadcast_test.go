@@ -16,7 +16,7 @@ func TestBroadcast(t *testing.T) {
 
 	msgs := []int64{1, 2, 3, 4, 5, 9, 8, 7, 6, 10}
 	for _, m := range msgs {
-		brd.broadcast(Workload{
+		brd.broadcast(workload{
 			Message: m,
 		})
 	}
@@ -46,7 +46,7 @@ func TestBroadcastConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for m := range ch {
-				brd.broadcast(Workload{
+				brd.broadcast(workload{
 					Message: m,
 				})
 			}
@@ -65,11 +65,11 @@ func TestRead(t *testing.T) {
 
 	msgs := []int64{1, 2, 3, 4, 5, 9, 8, 7, 6, 10}
 	for _, m := range msgs {
-		brd.broadcast(Workload{
+		brd.broadcast(workload{
 			Message: m,
 		})
 	}
-	resp := brd.read(Workload{})
+	resp := brd.read(workload{})
 	assert.Equal(t, msgs, resp["messages"], "didn't read all of the broadcasted messages")
 }
 
@@ -77,7 +77,7 @@ func TestTopology(t *testing.T) {
 	node := maelstrom.NewNode()
 	brd := New(node)
 
-	w := Workload{
+	w := workload{
 		Topology: map[string][]string{
 			"n1": []string{"n2", "n3"},
 			"n2": []string{"n3"},
@@ -93,7 +93,7 @@ func TestGetHandle(t *testing.T) {
 	node.Init("n1", []string{"n1"})
 	brd := New(node)
 
-	w := Workload{
+	w := workload{
 		Type: "topology",
 		Topology: map[string][]string{
 			"n1": []string{"n2", "n3"},
@@ -128,21 +128,6 @@ func TestAddSentLog(t *testing.T) {
 	p.addSentLog(node.ID(), id+1, msg)
 	assert.Len(t, p.sent[node.ID()], 2)
 }
-
-// func TestAckSentLog(t *testing.T) {
-// 	p := &Program{sent: map[string][]sentLog{
-// 		{"node1": []sentLog{{at: time.Now().Add(-time.Minute).UnixMicro(), msgId: 1, msg: 2}},
-// 			"node2": []sentLog{{at: time.Now().UnixMicro() - 1000, msgId: 3, msg: 4}}}}}
-// 	id := int64(1)
-
-// 	// Test removing a sent log for node1 with the correct ID
-// 	p.ackSentLog("node1", Workload{InReplyTo: id})
-// 	assert.Len(t, p.sent["node1"], 0)
-
-// 	// Test no change in sent logs for node2 since the message ID does not match
-// 	p.ackSentLog("node2", Workload{InReplyTo: id})
-// 	assert.Equal(t, len(p.sent["node2"]), 1)
-// }
 
 func TestRemoveFunction(t *testing.T) {
 	list := []sentLog{

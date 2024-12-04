@@ -2,7 +2,6 @@ package broadcast
 
 import (
 	"encoding/json"
-	"log"
 	"sync"
 	"time"
 
@@ -49,8 +48,6 @@ func New(n *maelstrom.Node) Program {
 	retrier := p.periodicJobs(1*time.Second, p.resendUnackedGossips)
 	flusher := p.periodicJobs(100*time.Millisecond, p.flushGossipBuffer)
 
-	log.Printf("new buffer: %+v", p.buffer)
-
 	wg.Add(2)
 	go retrier()
 	go flusher()
@@ -70,7 +67,6 @@ func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 		case "broadcast":
 			resp = p.broadcast(body, msg)
 		case "broadcast_ok":
-			p.ackSentLog(msg.Src, body)
 			return nil
 		case "read":
 			resp = p.read(body)

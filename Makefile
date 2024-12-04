@@ -36,11 +36,15 @@ else ifeq ($(SUB),3b)
 ## broadcast -> 3c: fault tolerant
 else ifeq ($(SUB),3c)
 	$(BASE_CMD) --node-count 5 --time-limit 20 --rate 10 --nemesis partition;
-## broadcast -> 3d: efficient part 1
+## broadcast -> 3d: efficient part 1 & 2
 else ifeq ($(SUB),3d)
 	$(BASE_CMD)	--node-count 25 --time-limit 20 --rate 100 --latency 100;
 else
 	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
+endif
+## grow only counter
+ifeq ($(CHALLENGE),grow-only)
+	$(BASE_CMD) --node-count 3 --rate 100 --time-limit 20 --nemesis partition;
 endif
 else
 	@echo "Unknown challenge: $(CHALLENGE)"

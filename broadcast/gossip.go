@@ -1,7 +1,6 @@
 package broadcast
 
 import (
-	"log"
 	"time"
 
 	uuid "github.com/google/uuid"
@@ -51,7 +50,7 @@ func (p *Program) ackGossip(src string, body workload) {
 	id := body.GossipId
 	for i, l := range p.gossiped[src] {
 		if l.gossipId == id {
-			log.Printf("acked gossip from %s (%s) for %+v\n", src, id, p.gossiped[src])
+			// log.Printf("acked gossip from %s (%s) for %+v\n", src, id, p.gossiped[src])
 			p.gossiped[src] = remove(p.gossiped[src], i)
 		}
 	}
@@ -107,10 +106,10 @@ func (p *Program) resendUnackedGossips() {
 		if len(gl) == 0 {
 			continue
 		}
-		log.Printf("resender for %s: %+v", n, gl)
+		// log.Printf("resender for %s: %+v", n, gl)
 		for _, l := range gl {
 			if time.Since(time.UnixMicro(l.at)) >= time.Second {
-				log.Printf("resending gossip batch to %s (%s): %+v", n, l.gossipId, l.msgs)
+				// log.Printf("resending gossip batch to %s (%s): %+v", n, l.gossipId, l.msgs)
 				p.node.Send(n, workload{
 					Type:        "gossip",
 					GossipId:    l.gossipId,

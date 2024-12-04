@@ -25,8 +25,6 @@ func TestBroadcast(t *testing.T) {
 	assert.Equal(t, msgs, brd.messages, "didn't get all of the broadcasted messages")
 }
 
-var wg sync.WaitGroup
-
 func TestBroadcastConcurrency(t *testing.T) {
 	node := maelstrom.NewNode()
 	brd := New(node)

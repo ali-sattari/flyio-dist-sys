@@ -6,9 +6,12 @@ import (
 	"main/echo"
 	"main/unique_ids"
 	"os"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
+
+var wg sync.WaitGroup
 
 func main() {
 	n := maelstrom.NewNode()
@@ -38,4 +41,6 @@ func main() {
 		log.Printf("ERROR: %s", err)
 		os.Exit(1)
 	}
+
+	wg.Wait()
 }

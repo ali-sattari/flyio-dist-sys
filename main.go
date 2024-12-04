@@ -29,6 +29,8 @@ func main() {
 	brdc := broadcast.New(n)
 	n.Handle("broadcast", brdc.GetHandle("broadcast"))
 	n.Handle("broadcast_ok", brdc.GetHandle("broadcast_ok"))
+	n.Handle("gossip", brdc.GetHandle("gossip"))
+	n.Handle("gossip_ok", brdc.GetHandle("gossip_ok"))
 	n.Handle("read", brdc.GetHandle("read"))
 	n.Handle("topology", brdc.GetHandle("topology"))
 

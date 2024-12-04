@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
-	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 	"github.com/stretchr/testify/assert"
@@ -16,9 +15,12 @@ func TestBroadcast(t *testing.T) {
 
 	msgs := []int64{1, 2, 3, 4, 5, 9, 8, 7, 6, 10}
 	for _, m := range msgs {
-		brd.broadcast(workload{
-			Message: m,
-		})
+		brd.broadcast(
+			workload{
+				Message: m,
+			},
+			maelstrom.Message{},
+		)
 	}
 	assert.Equal(t, msgs, brd.messages, "didn't get all of the broadcasted messages")
 }
@@ -46,9 +48,12 @@ func TestBroadcastConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for m := range ch {
-				brd.broadcast(workload{
-					Message: m,
-				})
+				brd.broadcast(
+					workload{
+						Message: m,
+					},
+					maelstrom.Message{},
+				)
 			}
 		}()
 	}
@@ -65,9 +70,12 @@ func TestRead(t *testing.T) {
 
 	msgs := []int64{1, 2, 3, 4, 5, 9, 8, 7, 6, 10}
 	for _, m := range msgs {
-		brd.broadcast(workload{
-			Message: m,
-		})
+		brd.broadcast(
+			workload{
+				Message: m,
+			},
+			maelstrom.Message{},
+		)
 	}
 	resp := brd.read(workload{})
 	assert.Equal(t, msgs, resp["messages"], "didn't read all of the broadcasted messages")
@@ -110,23 +118,6 @@ func TestGetHandle(t *testing.T) {
 	})
 	assert.Nil(t, res, "error on topology workload")
 	assert.Equal(t, w.Topology, brd.topo, "topology not saved correctly")
-}
-
-func TestAddSentLog(t *testing.T) {
-	node := maelstrom.NewNode()
-	node.Init("n1", []string{"n1"})
-	p := New(node)
-	id := 12345
-	msg := int64(67890)
-
-	// Test when the map is empty
-	p.addSentLog(node.ID(), id, msg)
-	assert.Len(t, p.sent[node.ID()], 1)
-
-	// Test when the map is not empty
-	p.sent[node.ID()] = []sentLog{{at: time.Now().UnixMicro() - 1000, msgId: id, msg: msg}}
-	p.addSentLog(node.ID(), id+1, msg)
-	assert.Len(t, p.sent[node.ID()], 2)
 }
 
 func TestRemoveFunction(t *testing.T) {

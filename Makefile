@@ -6,7 +6,7 @@ BASE_CMD := maelstrom test -w $(CHALLENGE) --bin $(BIN)
 .build:
 	@echo "Building the project..."
 	@mkdir -p bin
-	@go build -o $(BIN) .
+	@go build -C ./$(CHALLENGE)/ -o ../$(BIN)
 
 run: .build
 # check if CHALLENGE is empty
@@ -43,7 +43,7 @@ else
 	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
 endif
 ## grow only counter
-ifeq ($(CHALLENGE),grow-only)
+ifeq ($(CHALLENGE),g-counter)
 	$(BASE_CMD) --node-count 3 --rate 100 --time-limit 20 --nemesis partition;
 endif
 else

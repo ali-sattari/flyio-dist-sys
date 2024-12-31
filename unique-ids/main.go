@@ -1,14 +1,36 @@
-package unique_ids
+package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
-	"main/unique_ids/snowflaker"
+	"log"
+	"main/pkg/snowflaker"
 	"os"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
+
+var wg sync.WaitGroup
+
+func main() {
+	n := maelstrom.NewNode()
+
+	unq_id, err := New(n)
+	if err != nil {
+		log.Printf("ERROR: %s", err)
+		os.Exit(1)
+	}
+	n.Handle("generate", unq_id.Handle)
+
+	if err := n.Run(); err != nil {
+		log.Printf("ERROR: %s", err)
+		os.Exit(1)
+	}
+
+	wg.Wait()
+}
 
 type Program struct {
 	node *maelstrom.Node

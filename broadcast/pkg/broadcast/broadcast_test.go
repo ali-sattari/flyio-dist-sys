@@ -59,7 +59,7 @@ func TestBroadcastConcurrency(t *testing.T) {
 	wg.Wait()
 
 	messages := len(brd.messages)
-	assert.Equal(t, count, messages, "lost %d mesages in %d total", count-messages, count)
+	assert.Equal(t, count, messages, "lost %d messages in %d total", count-messages, count)
 }
 
 func TestRead(t *testing.T) {
@@ -85,9 +85,9 @@ func TestTopology(t *testing.T) {
 
 	w := workload{
 		Topology: map[string][]string{
-			"n1": []string{"n2", "n3"},
-			"n2": []string{"n3"},
-			"n3": []string{"n1"},
+			"n1": {"n2", "n3"},
+			"n2": {"n3"},
+			"n3": {"n1"},
 		},
 	}
 	brd.topology(w)
@@ -102,9 +102,9 @@ func TestGetHandle(t *testing.T) {
 	w := workload{
 		Type: "topology",
 		Topology: map[string][]string{
-			"n1": []string{"n2", "n3"},
-			"n2": []string{"n3"},
-			"n3": []string{"n1"},
+			"n1": {"n2", "n3"},
+			"n2": {"n3"},
+			"n3": {"n1"},
 		},
 	}
 	b, _ := json.Marshal(w)
@@ -120,17 +120,17 @@ func TestGetHandle(t *testing.T) {
 
 func TestRemoveFunction(t *testing.T) {
 	list := []sentLog{
-		sentLog{msg: int64(1)},
-		sentLog{msg: int64(2)},
-		sentLog{msg: int64(3)},
-		sentLog{msg: int64(4)},
-		sentLog{msg: int64(5)},
+		{msg: int64(1)},
+		{msg: int64(2)},
+		{msg: int64(3)},
+		{msg: int64(4)},
+		{msg: int64(5)},
 	}
 	expected := []sentLog{
-		sentLog{msg: int64(1)},
-		sentLog{msg: int64(2)},
-		sentLog{msg: int64(4)},
-		sentLog{msg: int64(5)},
+		{msg: int64(1)},
+		{msg: int64(2)},
+		{msg: int64(4)},
+		{msg: int64(5)},
 	}
 
 	result := remove(list, 2)

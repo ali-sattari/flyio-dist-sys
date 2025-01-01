@@ -61,11 +61,11 @@ func TestHandlePoll(t *testing.T) {
 			key:  "testKey",
 			body: workload{
 				Type:    "poll",
-				Offsets: offsets{"testKey": 0},
+				Offsets: offset_list{"testKey": 0},
 			},
 			expected: response{
 				Type: "poll_ok",
-				Msgs: messages{"testKey": {}},
+				Msgs: message_list{"testKey": {}},
 			},
 		},
 		{
@@ -73,11 +73,11 @@ func TestHandlePoll(t *testing.T) {
 			key:  "testKey",
 			body: workload{
 				Type:    "poll",
-				Offsets: offsets{"testKey": 0},
+				Offsets: offset_list{"testKey": 0},
 			},
 			expected: response{
 				Type: "poll_ok",
-				Msgs: messages{"testKey": {{101, 100}}},
+				Msgs: message_list{"testKey": {{101, 100}}},
 			},
 		},
 	}
@@ -112,7 +112,7 @@ func TestHandleCommitOffsets(t *testing.T) {
 			key:  "testKey",
 			body: workload{
 				Type:    "commit_offsets",
-				Offsets: offsets{"testKey": 101},
+				Offsets: offset_list{"testKey": 101},
 			},
 			expected: response{
 				Type: "commit_offsets_ok",
@@ -158,7 +158,7 @@ func TestHandleListCommittedOffsets(t *testing.T) {
 			},
 			expected: response{
 				Type:    "list_committed_offsets_ok",
-				Offsets: offsets{"k1": 101},
+				Offsets: offset_list{"k1": 101},
 			},
 		},
 		{
@@ -183,7 +183,7 @@ func TestHandleListCommittedOffsets(t *testing.T) {
 			},
 			expected: response{
 				Type:    "list_committed_offsets_ok",
-				Offsets: offsets{"k1": 101, "k2": 42, "k3": 350},
+				Offsets: offset_list{"k1": 101, "k2": 42, "k3": 350},
 			},
 		},
 	}

@@ -27,14 +27,14 @@ type workload struct {
 	Offsets map[string]int64
 }
 
-type messages map[string][][2]int64
-type offsets map[string]int64
+type message_list map[string][][2]int64
+type offset_list map[string]int64
 
 type response struct {
-	Type    string   `json:"type,omitempty"`
-	Msgs    messages `json:"msgs,omitempty"`
-	Offset  int64    `json:"offset,omitempty"`
-	Offsets offsets  `json:"offsets,omitempty"`
+	Type    string       `json:"type,omitempty"`
+	Msgs    message_list `json:"msgs,omitempty"`
+	Offset  int64        `json:"offset,omitempty"`
+	Offsets offset_list  `json:"offsets,omitempty"`
 }
 
 var wg sync.WaitGroup
@@ -98,7 +98,7 @@ func (p *Program) handlePoll(body workload) response {
 	p.storageMtx.RLock()
 	defer p.storageMtx.RUnlock()
 
-	logs := messages{}
+	logs := message_list{}
 	for k, o := range body.Offsets {
 		key, ok := p.storage[k]
 		if ok {
@@ -139,7 +139,7 @@ func (p *Program) handleListCommittedOffsets(body workload) response {
 
 	res := response{
 		Type:    "list_committed_offsets_ok",
-		Offsets: offsets{},
+		Offsets: offset_list{},
 	}
 	for _, k := range body.Keys {
 		if key, ok := p.storage[k]; ok {

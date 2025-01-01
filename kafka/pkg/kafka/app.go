@@ -3,14 +3,18 @@ package kafka
 import (
 	"encoding/json"
 	"log"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 type Program struct {
-	node       *maelstrom.Node
-	storage    map[string]keyStore
-	lastOffset int64
+	node          *maelstrom.Node
+	storage       map[string]*keyStore
+	storageMtx    *sync.RWMutex
+	storageChan   chan map[string]msgLog
+	lastOffset    int64
+	lastOffsetMtx *sync.Mutex
 }
 
 type workload struct {
@@ -23,19 +27,32 @@ type workload struct {
 	Offsets map[string]int64
 }
 
+type messages map[string][][2]int64
+type offsets map[string]int64
+
 type response struct {
-	Type    string
-	Msgs    map[string][]msgLog
-	Offset  int64
-	Offsets map[string]int64
+	Type    string   `json:"type,omitempty"`
+	Msgs    messages `json:"msgs,omitempty"`
+	Offset  int64    `json:"offset,omitempty"`
+	Offsets offsets  `json:"offsets,omitempty"`
 }
+
+var wg sync.WaitGroup
+
+const LAST_OFFSET_START = 0
 
 func New(n *maelstrom.Node) Program {
 	p := Program{
-		node:       n,
-		storage:    map[string]keyStore{},
-		lastOffset: 100,
+		node:          n,
+		storage:       map[string]*keyStore{},
+		storageMtx:    &sync.RWMutex{},
+		storageChan:   make(chan map[string]msgLog, 5),
+		lastOffset:    LAST_OFFSET_START,
+		lastOffsetMtx: &sync.Mutex{},
 	}
+
+	wg.Add(1)
+	go p.storeMsgWorker()
 
 	return p
 }
@@ -64,7 +81,12 @@ func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 }
 
 func (p *Program) handleSend(body workload) response {
-	o := p.storeMsg(body.Key, body.Msg)
+	o := p.getNewOffset()
+
+	p.storageChan <- map[string]msgLog{
+		body.Key: {offset: o, msg: body.Msg},
+	}
+
 	resp := response{
 		Type:   "send_ok",
 		Offset: o,
@@ -73,12 +95,20 @@ func (p *Program) handleSend(body workload) response {
 }
 
 func (p *Program) handlePoll(body workload) response {
-	logs := map[string][]msgLog{}
+	p.storageMtx.RLock()
+	defer p.storageMtx.RUnlock()
+
+	logs := messages{}
 	for k, o := range body.Offsets {
 		key, ok := p.storage[k]
 		if ok {
-			logs[k] = key.read(o)
+			for _, ml := range key.read(o) {
+				logs[k] = append(logs[k], [2]int64{ml.offset, ml.msg})
+			}
+		} else {
+			logs[k] = nil
 		}
+		// log.Printf("offsets for key %s at %d: %+v\n", k, o, logs[k])
 	}
 
 	res := response{
@@ -89,6 +119,9 @@ func (p *Program) handlePoll(body workload) response {
 }
 
 func (p *Program) handleCommitOffsets(body workload) response {
+	p.storageMtx.RLock()
+	defer p.storageMtx.RUnlock()
+
 	for k, o := range body.Offsets {
 		if key, ok := p.storage[k]; ok {
 			err := key.commitOffset(o)
@@ -101,32 +134,57 @@ func (p *Program) handleCommitOffsets(body workload) response {
 }
 
 func (p *Program) handleListCommittedOffsets(body workload) response {
+	p.storageMtx.RLock()
+	defer p.storageMtx.RUnlock()
+
 	res := response{
 		Type:    "list_committed_offsets_ok",
-		Offsets: map[string]int64{},
+		Offsets: offsets{},
 	}
 	for _, k := range body.Keys {
 		if key, ok := p.storage[k]; ok {
 			res.Offsets[k] = key.getCommittedOffset()
+		} else {
+			res.Offsets[k] = 0
 		}
 	}
 	return res
 }
 
 func (p *Program) getNewOffset() int64 {
+	p.lastOffsetMtx.Lock()
+	defer p.lastOffsetMtx.Unlock()
+
 	p.lastOffset += 1
 	return p.lastOffset
 }
 
-func (p *Program) storeMsg(key string, msg int64) int64 {
-	k, ok := p.storage[key]
+func (p *Program) storeMsgWorker() {
+	for msgs := range p.storageChan {
+		for key, logEntry := range msgs {
+			p.storeMsg(key, logEntry)
+		}
+	}
+}
+
+func (p *Program) storeMsg(key string, entry msgLog) {
+	p.storageMtx.Lock()
+	defer p.storageMtx.Unlock()
+
+	_, ok := p.storage[key]
 	if !ok {
-		p.storage[key] = keyStore{
+		ks := keyStore{
 			key:       key,
 			committed: 0,
 			logs:      []msgLog{},
 		}
+		p.storage[key] = &ks
 	}
-	l := k.write(msg, p.getNewOffset())
-	return l.offset
+	p.storage[key].write(entry.msg, entry.offset)
+	// log.Printf("total %d keys in storage, stored msg %+v (%+v)\n", len(p.storage), res, p.storage)
+}
+
+func (p *Program) Shutdown() {
+	close(p.storageChan)
+	wg.Wait()
 }

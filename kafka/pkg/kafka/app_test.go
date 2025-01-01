@@ -2,7 +2,9 @@ package kafka
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
@@ -23,7 +25,7 @@ func TestHandleSend(t *testing.T) {
 			},
 			expected: response{
 				Type:   "send_ok",
-				Offset: 101, // Assuming lastOffset starts from 100
+				Offset: LAST_OFFSET_START + 1,
 			},
 		},
 	}
@@ -59,11 +61,11 @@ func TestHandlePoll(t *testing.T) {
 			key:  "testKey",
 			body: workload{
 				Type:    "poll",
-				Offsets: map[string]int64{"testKey": 0},
+				Offsets: offsets{"testKey": 0},
 			},
 			expected: response{
 				Type: "poll_ok",
-				Msgs: map[string][]msgLog{},
+				Msgs: messages{"testKey": {}},
 			},
 		},
 		{
@@ -71,11 +73,11 @@ func TestHandlePoll(t *testing.T) {
 			key:  "testKey",
 			body: workload{
 				Type:    "poll",
-				Offsets: map[string]int64{"testKey": 0},
+				Offsets: offsets{"testKey": 0},
 			},
 			expected: response{
 				Type: "poll_ok",
-				Msgs: map[string][]msgLog{"testKey": []msgLog{{offset: 101, msg: 100}}},
+				Msgs: messages{"testKey": {{101, 100}}},
 			},
 		},
 	}
@@ -85,13 +87,13 @@ func TestHandlePoll(t *testing.T) {
 			n := maelstrom.NewNode()
 			p := New(n)
 			if tt.body.Type == "poll" && len(tt.expected.Msgs[tt.key]) > 0 {
-				p.storage[tt.key] = keyStore{
-					logs: []msgLog{{offset: 101, msg: 100}},
+				for _, ml := range tt.expected.Msgs[tt.key] {
+					p.storeMsg(tt.key, msgLog{ml[0], ml[1]})
 				}
 			}
 
 			resp := p.handlePoll(tt.body)
-			if resp.Type != tt.expected.Type || !reflect.DeepEqual(resp.Msgs, tt.expected.Msgs) {
+			if resp.Type != tt.expected.Type || fmt.Sprint(resp.Msgs) != fmt.Sprint(tt.expected.Msgs) {
 				t.Errorf("expected response %+v, got %+v", tt.expected, resp)
 			}
 		})
@@ -110,7 +112,7 @@ func TestHandleCommitOffsets(t *testing.T) {
 			key:  "testKey",
 			body: workload{
 				Type:    "commit_offsets",
-				Offsets: map[string]int64{"testKey": 101},
+				Offsets: offsets{"testKey": 101},
 			},
 			expected: response{
 				Type: "commit_offsets_ok",
@@ -122,7 +124,7 @@ func TestHandleCommitOffsets(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			n := maelstrom.NewNode()
 			p := New(n)
-			p.storage[tt.key] = keyStore{
+			p.storage[tt.key] = &keyStore{
 				logs: []msgLog{{offset: 101, msg: 100}},
 			}
 
@@ -138,17 +140,50 @@ func TestHandleListCommittedOffsets(t *testing.T) {
 	tests := []struct {
 		name     string
 		body     workload
+		storage  map[string]*keyStore
 		expected response
 	}{
 		{
 			name: "Single Key",
 			body: workload{
 				Type: "list_committed_offsets",
-				Keys: []string{"testKey"},
+				Keys: []string{"k1"},
+			},
+			storage: map[string]*keyStore{
+				"k1": {
+					key:       "k1",
+					committed: 101,
+					logs:      []msgLog{{offset: 101, msg: 100}},
+				},
 			},
 			expected: response{
 				Type:    "list_committed_offsets_ok",
-				Offsets: map[string]int64{"testKey": 101},
+				Offsets: offsets{"k1": 101},
+			},
+		},
+		{
+			name: "Multiple Keys",
+			body: workload{
+				Type: "list_committed_offsets",
+				Keys: []string{"k1", "k2", "k3"},
+			},
+			storage: map[string]*keyStore{
+				"k1": {
+					key:       "k1",
+					committed: 101,
+				},
+				"k2": {
+					key:       "k2",
+					committed: 42,
+				},
+				"k3": {
+					key:       "k3",
+					committed: 350,
+				},
+			},
+			expected: response{
+				Type:    "list_committed_offsets_ok",
+				Offsets: offsets{"k1": 101, "k2": 42, "k3": 350},
 			},
 		},
 	}
@@ -157,10 +192,7 @@ func TestHandleListCommittedOffsets(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			n := maelstrom.NewNode()
 			p := New(n)
-			p.storage[tt.body.Keys[0]] = keyStore{
-				logs:      []msgLog{{offset: 101, msg: 100}},
-				committed: 101,
-			}
+			p.storage = tt.storage
 
 			resp := p.handleListCommittedOffsets(tt.body)
 			if resp.Type != tt.expected.Type || !reflect.DeepEqual(resp.Offsets, tt.expected.Offsets) {
@@ -168,4 +200,115 @@ func TestHandleListCommittedOffsets(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetNewOffset(t *testing.T) {
+	tests := []struct {
+		name     string
+		initial  int64
+		expected int64
+	}{
+		{
+			name:     "First Call",
+			initial:  LAST_OFFSET_START,
+			expected: LAST_OFFSET_START + 1,
+		},
+		{
+			name:     "Subsequent Calls",
+			initial:  200,
+			expected: 201,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := Program{
+				lastOffset:    tt.initial,
+				lastOffsetMtx: &sync.Mutex{},
+			}
+			offset := p.getNewOffset()
+			if offset != tt.expected {
+				t.Errorf("expected offset %d, got %d", tt.expected, offset)
+			}
+		})
+	}
+}
+
+func TestStoreMsg(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		entry    msgLog
+		expected map[string]*keyStore
+	}{
+		{
+			name: "New Key",
+			key:  "testKey1",
+			entry: msgLog{
+				offset: 101,
+				msg:    100,
+			},
+			expected: map[string]*keyStore{
+				"testKey1": {
+					key:       "testKey1",
+					committed: 0,
+					logs:      []msgLog{{offset: 101, msg: 100}},
+				},
+			},
+		},
+		{
+			name: "Existing Key",
+			key:  "testKey2",
+			entry: msgLog{
+				offset: 201,
+				msg:    200,
+			},
+			expected: map[string]*keyStore{
+				"testKey2": {
+					key:       "testKey2",
+					committed: 0,
+					logs:      []msgLog{{offset: 201, msg: 200}},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := New(&maelstrom.Node{})
+			p.storeMsg(tt.key, tt.entry)
+			if len(p.storage) != 1 {
+				t.Errorf("expected storage to contain 1 key, got %d", len(p.storage))
+			}
+
+			actualKeyStore := p.storage[tt.key]
+			if actualKeyStore == nil || len(actualKeyStore.logs) != 1 ||
+				actualKeyStore.logs[0].offset != tt.entry.offset || actualKeyStore.logs[0].msg != tt.entry.msg {
+				t.Errorf("expected key store %+v, got %+v", tt.expected, p.storage)
+			}
+		})
+	}
+
+	// Concurrency test: multiple writes to the same key
+	t.Run("Concurrency", func(t *testing.T) {
+		const numMessages = 1000
+		p := New(&maelstrom.Node{})
+
+		var wg sync.WaitGroup
+		wg.Add(numMessages)
+
+		for i := 0; i < numMessages; i++ {
+			go func(i int) {
+				defer wg.Done()
+				p.storeMsg("concurrentKey", msgLog{offset: int64(i), msg: int64(i)})
+			}(i)
+		}
+
+		wg.Wait()
+
+		keyStore, ok := p.storage["concurrentKey"]
+		if !ok || len(keyStore.logs) != numMessages {
+			t.Errorf("expected key store with %d logs for 'concurrentKey', got %+v", numMessages, keyStore)
+		}
+	})
 }

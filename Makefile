@@ -46,10 +46,21 @@ else
 	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
 endif
 endif
-
 ## grow only counter
 ifeq ($(CHALLENGE),g-counter)
 	$(BASE_CMD) --node-count 3 --rate 100 --time-limit 20 --nemesis partition;
+endif
+## kafka log
+ifeq ($(CHALLENGE),kafka)
+ifeq ($(SUB),)
+	$(error "SUB is required. Usage: make run CHALLENGE=broadcast SUB=3a")
+endif
+## kafka log -> 5a: single-node
+ifeq ($(SUB),5a)
+	$(BASE_CMD) --node-count 1 --concurrency 2n --time-limit 20 --rate 1000;
+else
+	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
+endif
 else
 	@echo "Unknown challenge: $(CHALLENGE)"
 endif

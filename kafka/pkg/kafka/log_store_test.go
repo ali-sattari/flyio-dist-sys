@@ -71,6 +71,7 @@ func TestKeyStore(t *testing.T) {
 			for _, msg := range tt.writeMsgs {
 				store.write(msg.msg, msg.offset)
 			}
+			// t.Logf("logs %+v", store)
 
 			var got []msgLog
 			got = store.read(tt.readOffset)

@@ -8,16 +8,13 @@ import (
 	"syscall"
 
 	"main/pkg/kafka"
-
-	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 var wg sync.WaitGroup
 
 func main() {
-	n := maelstrom.NewNode()
-
-	kfk := kafka.New(n)
+	n := kafka.NewWrappedNode()
+	kfk := kafka.New(n, kafka.NewWrappedKV(n, "linear"), kafka.NewWrappedKV(n, "sequential"))
 
 	rpcs := []string{"send", "poll", "commit_offsets", "list_committed_offsets"}
 	for _, r := range rpcs {

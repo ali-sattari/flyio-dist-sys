@@ -1,7 +1,9 @@
 package kafka
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 
@@ -9,7 +11,9 @@ import (
 )
 
 type Program struct {
-	node          *maelstrom.Node
+	node          NodeInterface
+	linKv         KVInterface
+	seqKv         KVInterface
 	storage       map[string]*keyStore
 	storageMtx    *sync.RWMutex
 	storageChan   chan map[string]msgLog
@@ -39,11 +43,15 @@ type response struct {
 
 var wg sync.WaitGroup
 
-const LAST_OFFSET_START = 0
+const (
+	LAST_OFFSET_START = 0
+)
 
-func New(n *maelstrom.Node) Program {
+func New(n NodeInterface, linKv, seqKv KVInterface) Program {
 	p := Program{
 		node:          n,
+		linKv:         linKv,
+		seqKv:         seqKv,
 		storage:       map[string]*keyStore{},
 		storageMtx:    &sync.RWMutex{},
 		storageChan:   make(chan map[string]msgLog, 5),
@@ -71,9 +79,9 @@ func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 		case "poll":
 			resp = p.handlePoll(body)
 		case "commit_offsets":
-			resp = p.handleCommitOffsets(body)
+			resp = p.handleCommitOffsetsKv(body)
 		case "list_committed_offsets":
-			resp = p.handleListCommittedOffsets(body)
+			resp = p.handleListCommittedOffsetsKv(body)
 		}
 
 		return p.node.Reply(msg, resp)
@@ -133,6 +141,35 @@ func (p *Program) handleCommitOffsets(body workload) response {
 	return response{Type: "commit_offsets_ok"}
 }
 
+func (p *Program) handleCommitOffsetsKv(body workload) response {
+	p.storageMtx.RLock()
+	defer p.storageMtx.RUnlock()
+
+	var curr int64
+	for k, o := range body.Offsets {
+		key, ok := p.storage[k]
+		if ok {
+			curr = key.getCommittedOffset()
+
+			err := key.commitOffset(o)
+			if err != nil {
+				log.Printf("error setting commit offset for key %+v: %s", key, err)
+			}
+		}
+
+		err := p.linKv.CompareAndSwap(context.Background(), formatCommittedOffsetKey(k), curr, o, true)
+		if err != nil {
+			switch e := err.(type) {
+			case *maelstrom.RPCError:
+				if e.Code == maelstrom.PreconditionFailed {
+					log.Printf("error storing commit offset in LinKV for key %+v: %s", k, err)
+				}
+			}
+		}
+	}
+	return response{Type: "commit_offsets_ok"}
+}
+
 func (p *Program) handleListCommittedOffsets(body workload) response {
 	p.storageMtx.RLock()
 	defer p.storageMtx.RUnlock()
@@ -146,6 +183,23 @@ func (p *Program) handleListCommittedOffsets(body workload) response {
 			res.Offsets[k] = key.getCommittedOffset()
 		} else {
 			res.Offsets[k] = 0
+		}
+	}
+	return res
+}
+
+func (p *Program) handleListCommittedOffsetsKv(body workload) response {
+	res := response{
+		Type:    "list_committed_offsets_ok",
+		Offsets: offset_list{},
+	}
+	for _, k := range body.Keys {
+		kv, err := p.linKv.ReadInt(context.Background(), formatCommittedOffsetKey(k))
+		if err != nil {
+			log.Printf("error ReadIn on %s: %+v", k, err)
+			res.Offsets[k] = 0
+		} else {
+			res.Offsets[k] = int64(kv)
 		}
 	}
 	return res
@@ -187,4 +241,8 @@ func (p *Program) storeMsg(key string, entry msgLog) {
 func (p *Program) Shutdown() {
 	close(p.storageChan)
 	wg.Wait()
+}
+
+func formatCommittedOffsetKey(key string) string {
+	return fmt.Sprintf("co_%s", key)
 }

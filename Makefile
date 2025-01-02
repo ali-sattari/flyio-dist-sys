@@ -58,9 +58,12 @@ endif
 ## kafka log -> 5a: single-node
 ifeq ($(SUB),5a)
 	$(BASE_CMD) --node-count 1 --concurrency 2n --time-limit 20 --rate 1000;
+else ifeq ($(SUB),5b)
+	$(BASE_CMD) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000;
 else
 	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
 endif
+
 else
 	@echo "Unknown challenge: $(CHALLENGE)"
 endif

@@ -1,7 +1,6 @@
 package kafka
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sync"
@@ -32,16 +31,14 @@ func TestHandleSend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n := maelstrom.NewNode()
-			p := New(n)
-			msg := maelstrom.Message{
-				Body: json.RawMessage(`{}`),
-			}
-			if err := json.Unmarshal([]byte(`{"type": "send", "key": "testKey", "msg": 100}`), &msg.Body); err != nil {
-				t.Fatalf("failed to unmarshal message body: %v", err)
-			}
+			mockNode := NewMockNode()
+			mockLinKV := NewMockKV()
+			mockSeqKV := NewMockKV()
+
+			p := New(mockNode, mockLinKV, mockSeqKV)
 
 			resp := p.handleSend(tt.body)
+
 			if resp.Type != tt.expected.Type || resp.Offset != tt.expected.Offset {
 				t.Errorf("expected response %+v, got %+v", tt.expected, resp)
 			}
@@ -85,7 +82,7 @@ func TestHandlePoll(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			n := maelstrom.NewNode()
-			p := New(n)
+			p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
 			if tt.body.Type == "poll" && len(tt.expected.Msgs[tt.key]) > 0 {
 				for _, ml := range tt.expected.Msgs[tt.key] {
 					p.storeMsg(tt.key, msgLog{ml[0], ml[1]})
@@ -123,7 +120,7 @@ func TestHandleCommitOffsets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			n := maelstrom.NewNode()
-			p := New(n)
+			p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
 			p.storage[tt.key] = &keyStore{
 				logs: []msgLog{{offset: 101, msg: 100}},
 			}
@@ -191,7 +188,7 @@ func TestHandleListCommittedOffsets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			n := maelstrom.NewNode()
-			p := New(n)
+			p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
 			p.storage = tt.storage
 
 			resp := p.handleListCommittedOffsets(tt.body)
@@ -275,7 +272,8 @@ func TestStoreMsg(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := New(&maelstrom.Node{})
+			n := maelstrom.NewNode()
+			p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
 			p.storeMsg(tt.key, tt.entry)
 			if len(p.storage) != 1 {
 				t.Errorf("expected storage to contain 1 key, got %d", len(p.storage))
@@ -292,7 +290,8 @@ func TestStoreMsg(t *testing.T) {
 	// Concurrency test: multiple writes to the same key
 	t.Run("Concurrency", func(t *testing.T) {
 		const numMessages = 1000
-		p := New(&maelstrom.Node{})
+		n := maelstrom.NewNode()
+		p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
 
 		var wg sync.WaitGroup
 		wg.Add(numMessages)
@@ -311,4 +310,193 @@ func TestStoreMsg(t *testing.T) {
 			t.Errorf("expected key store with %d logs for 'concurrentKey', got %+v", numMessages, keyStore)
 		}
 	})
+}
+
+func TestHandleCommitOffsetsKv(t *testing.T) {
+	tests := []struct {
+		name            string
+		body            workload
+		storage         map[string]*keyStore
+		kvError         error
+		expectedKvCalls int
+	}{
+		{
+			name: "Single Key Commit",
+			body: workload{
+				Type:    "commit_offsets",
+				Offsets: offset_list{"k1": 101},
+			},
+			storage: map[string]*keyStore{
+				"k1": {
+					key:       "k1",
+					committed: 0,
+					logs:      []msgLog{{offset: 101, msg: 100}},
+				},
+			},
+			kvError:         nil,
+			expectedKvCalls: 1,
+		},
+		{
+			name: "Multiple Keys Commit",
+			body: workload{
+				Type:    "commit_offsets",
+				Offsets: offset_list{"k1": 101, "k2": 102},
+			},
+			storage: map[string]*keyStore{
+				"k1": {key: "k1", committed: 0},
+				"k2": {key: "k2", committed: 0},
+			},
+			kvError:         nil,
+			expectedKvCalls: 2,
+		},
+		{
+			name: "Key Not Found Error",
+			body: workload{
+				Type:    "commit_offsets",
+				Offsets: offset_list{"k1": 101},
+			},
+			storage:         map[string]*keyStore{}, // Empty storage to simulate key not found
+			kvError:         maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "key not found"),
+			expectedKvCalls: 1,
+		},
+		{
+			name: "Mixed Keys - Some Found Some Not",
+			body: workload{
+				Type:    "commit_offsets",
+				Offsets: offset_list{"k1": 101, "k2": 102, "k3": 103},
+			},
+			storage: map[string]*keyStore{
+				"k1": {key: "k1", committed: 0},
+				// k2 not found
+				"k3": {key: "k3", committed: 0},
+			},
+			kvError:         maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "key not found"),
+			expectedKvCalls: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockNode := NewMockNode()
+			mockKV := NewMockKV()
+			mockKV.ReturnError = tt.kvError
+
+			p := Program{
+				node:       mockNode,
+				linKv:      mockKV,
+				storage:    tt.storage,
+				storageMtx: &sync.RWMutex{},
+			}
+
+			resp := p.handleCommitOffsetsKv(tt.body)
+
+			// Check response type
+			if resp.Type != "commit_offsets_ok" {
+				t.Errorf("expected response type 'commit_offsets_ok', got %s", resp.Type)
+			}
+
+			// Verify CompareAndSwap was called
+			if !mockKV.CompareAndSwapCalled {
+				t.Error("expected CompareAndSwap to be called")
+			}
+
+			// Count CompareAndSwap calls
+			casCount := 0
+			for range tt.body.Offsets {
+				casCount++
+			}
+			if casCount != tt.expectedKvCalls {
+				t.Errorf("expected %d CompareAndSwap calls, got %d", tt.expectedKvCalls, casCount)
+			}
+
+			// For key not found cases, verify the error was logged
+			// You might want to add a mock logger to capture and verify log messages
+			if tt.kvError != nil {
+				switch e := tt.kvError.(type) {
+				case *maelstrom.RPCError:
+					if e.Code != maelstrom.KeyDoesNotExist {
+						t.Errorf("expected KeyDoesNotExist error, got %v", e)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestHandleListCommittedOffsetsKv(t *testing.T) {
+	tests := []struct {
+		name           string
+		body           workload
+		kvReturnValue  int
+		kvError        error
+		expectedOffset offset_list
+	}{
+		{
+			name: "Single Key List",
+			body: workload{
+				Type: "list_committed_offsets",
+				Keys: []string{"k1"},
+			},
+			kvReturnValue:  101,
+			kvError:        nil,
+			expectedOffset: offset_list{"k1": 101},
+		},
+		{
+			name: "Multiple Keys List",
+			body: workload{
+				Type: "list_committed_offsets",
+				Keys: []string{"k1", "k2"},
+			},
+			kvReturnValue:  42,
+			kvError:        nil,
+			expectedOffset: offset_list{"k1": 42, "k2": 42},
+		},
+		{
+			name: "Key Not Found",
+			body: workload{
+				Type: "list_committed_offsets",
+				Keys: []string{"k1"},
+			},
+			kvReturnValue:  0,
+			kvError:        maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "key not found"),
+			expectedOffset: offset_list{"k1": 0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockNode := NewMockNode()
+			mockKV := NewMockKV()
+			mockKV.ReturnValue = tt.kvReturnValue
+			mockKV.ReturnError = tt.kvError
+
+			p := Program{
+				node:       mockNode,
+				linKv:      mockKV,
+				storageMtx: &sync.RWMutex{},
+			}
+
+			resp := p.handleListCommittedOffsetsKv(tt.body)
+
+			if resp.Type != "list_committed_offsets_ok" {
+				t.Errorf("expected response type 'list_committed_offsets_ok', got %s", resp.Type)
+			}
+
+			if !reflect.DeepEqual(resp.Offsets, tt.expectedOffset) {
+				t.Errorf("expected offsets %v, got %v", tt.expectedOffset, resp.Offsets)
+			}
+
+			if mockKV.ReadIntCalled != true {
+				t.Error("expected ReadInt to be called")
+			}
+
+			readCount := 0
+			for range tt.body.Keys {
+				readCount++
+			}
+			if readCount != len(tt.body.Keys) {
+				t.Errorf("expected %d ReadInt calls, got %d", len(tt.body.Keys), readCount)
+			}
+		})
+	}
 }

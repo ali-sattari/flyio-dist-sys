@@ -3,7 +3,6 @@ package kafka
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"sync"
 
@@ -11,14 +10,13 @@ import (
 )
 
 type Program struct {
-	node          NodeInterface
-	linKv         KVInterface
-	seqKv         KVInterface
-	storage       map[string]*keyStore
-	storageMtx    *sync.RWMutex
-	storageChan   chan map[string]msgLog
-	lastOffset    int64
-	lastOffsetMtx *sync.Mutex
+	node        NodeInterface
+	storage     map[string]*keyStore
+	storageMtx  *sync.RWMutex
+	storageChan chan map[string]msgLog
+
+	linKv KVInterface
+	seqKv KVInterface
 }
 
 type workload struct {
@@ -34,29 +32,38 @@ type workload struct {
 type message_list map[string][][2]int64
 type offset_list map[string]int64
 
-type response struct {
-	Type    string       `json:"type,omitempty"`
-	Msgs    message_list `json:"msgs,omitempty"`
-	Offset  int64        `json:"offset,omitempty"`
-	Offsets offset_list  `json:"offsets,omitempty"`
+type baseResponse struct {
+	Type string `json:"type"`
+}
+type sendResponse struct {
+	Type   string `json:"type"`
+	Offset int64  `json:"offset"`
+}
+type pollResponse struct {
+	Type string       `json:"type"`
+	Msgs message_list `json:"msgs"`
+}
+type listCommittedOffsetsResponse struct {
+	Type    string      `json:"type"`
+	Offsets offset_list `json:"offsets"`
 }
 
 var wg sync.WaitGroup
 
 const (
-	LAST_OFFSET_START = 0
+	LAST_OFFSET_KEY      = "global_offset_counter"
+	LAST_OFFSET_START    = 0
+	MAX_POLL_LIST_LENGTH = 10
 )
 
 func New(n NodeInterface, linKv, seqKv KVInterface) Program {
 	p := Program{
-		node:          n,
-		linKv:         linKv,
-		seqKv:         seqKv,
-		storage:       map[string]*keyStore{},
-		storageMtx:    &sync.RWMutex{},
-		storageChan:   make(chan map[string]msgLog, 5),
-		lastOffset:    LAST_OFFSET_START,
-		lastOffsetMtx: &sync.Mutex{},
+		node:        n,
+		linKv:       linKv,
+		seqKv:       seqKv,
+		storage:     map[string]*keyStore{},
+		storageMtx:  &sync.RWMutex{},
+		storageChan: make(chan map[string]msgLog, 5),
 	}
 
 	wg.Add(1)
@@ -72,145 +79,146 @@ func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 			return err
 		}
 
-		var resp response
+		var resp any
 		switch rpc_type {
 		case "send":
 			resp = p.handleSend(body)
 		case "poll":
 			resp = p.handlePoll(body)
 		case "commit_offsets":
-			resp = p.handleCommitOffsetsKv(body)
+			resp = p.handleCommitOffsets(body)
 		case "list_committed_offsets":
-			resp = p.handleListCommittedOffsetsKv(body)
+			resp = p.handleListCommittedOffsets(body)
 		}
 
 		return p.node.Reply(msg, resp)
 	}
 }
 
-func (p *Program) handleSend(body workload) response {
-	o := p.getNewOffset()
+func (p *Program) handleSend(body workload) sendResponse {
+	o := p.getNextOffset()
 
 	p.storageChan <- map[string]msgLog{
 		body.Key: {offset: o, msg: body.Msg},
 	}
 
-	resp := response{
+	resp := sendResponse{
 		Type:   "send_ok",
 		Offset: o,
 	}
 	return resp
 }
 
-func (p *Program) handlePoll(body workload) response {
-	p.storageMtx.RLock()
-	defer p.storageMtx.RUnlock()
+func (p *Program) storeMsg(key string, entry msgLog) {
+	_, ok := p.storage[key]
+	if !ok {
+		p.storage[key] = &keyStore{
+			key:       key,
+			committed: 0,
+			mtx:       &sync.RWMutex{},
+			offsets:   []int64{},
+		}
+	}
 
+	p.storage[key].store(entry.offset)
+	err := p.seqKv.Write(context.Background(), formatMsgKey(key, entry.offset), entry.msg)
+	if err != nil {
+		log.Printf("storeMsg: error storing in KV %+v", err)
+	}
+}
+
+func (p *Program) getNextOffset() int64 {
+	for {
+		current, _ := p.linKv.ReadInt(context.Background(), LAST_OFFSET_KEY)
+		next := current + 1
+		err := p.linKv.CompareAndSwap(context.Background(), LAST_OFFSET_KEY, current, next, true)
+		if err != nil {
+			switch e := err.(type) {
+			case *maelstrom.RPCError:
+				if e.Code == maelstrom.PreconditionFailed {
+					log.Printf("getNextOffset: PreconditionFailed on CAS failed for %d -> %d", current, next)
+					continue
+				}
+			}
+		}
+		return int64(next)
+	}
+}
+
+func (p *Program) handlePoll(body workload) pollResponse {
 	logs := message_list{}
 	for k, o := range body.Offsets {
 		key, ok := p.storage[k]
+		logs[k] = [][2]int64{}
 		if ok {
-			for _, ml := range key.read(o) {
-				logs[k] = append(logs[k], [2]int64{ml.offset, ml.msg})
+			count := 0
+			ol := key.getOffsets(o)
+			// log.Printf("handlePoll key offsets: %+v", ol)
+			for _, offset := range ol {
+				if count == MAX_POLL_LIST_LENGTH {
+					break
+				}
+				val, err := p.seqKv.ReadInt(context.Background(), formatMsgKey(k, offset))
+				// log.Printf("handlePoll: ReaInt for %s:%d -> %+v", k, offset, val)
+				if err != nil {
+					switch e := err.(type) {
+					case *maelstrom.RPCError:
+						if e.Code == maelstrom.KeyDoesNotExist {
+							log.Printf("handlePoll: KeyDoesNotExist on ReaInt for %s:%d", k, offset)
+							continue
+						}
+					}
+				}
+				logs[k] = append(logs[k], [2]int64{offset, int64(val)})
+				count++
 			}
-		} else {
-			logs[k] = nil
 		}
-		// log.Printf("offsets for key %s at %d: %+v\n", k, o, logs[k])
 	}
 
-	res := response{
+	res := pollResponse{
 		Type: "poll_ok",
 		Msgs: logs,
 	}
 	return res
 }
 
-func (p *Program) handleCommitOffsets(body workload) response {
-	p.storageMtx.RLock()
-	defer p.storageMtx.RUnlock()
-
+func (p *Program) handleCommitOffsets(body workload) baseResponse {
 	for k, o := range body.Offsets {
-		if key, ok := p.storage[k]; ok {
-			err := key.commitOffset(o)
-			if err != nil {
-				log.Printf("error setting commit offset for key %+v: %s", key, err)
-			}
-		}
-	}
-	return response{Type: "commit_offsets_ok"}
-}
-
-func (p *Program) handleCommitOffsetsKv(body workload) response {
-	p.storageMtx.RLock()
-	defer p.storageMtx.RUnlock()
-
-	var curr int64
-	for k, o := range body.Offsets {
-		key, ok := p.storage[k]
-		if ok {
-			curr = key.getCommittedOffset()
-
-			err := key.commitOffset(o)
-			if err != nil {
-				log.Printf("error setting commit offset for key %+v: %s", key, err)
-			}
-		}
+		ks := p.getKeyStore(k)
+		curr := ks.getCommittedOffset()
+		ks.commitOffset(o)
 
 		err := p.linKv.CompareAndSwap(context.Background(), formatCommittedOffsetKey(k), curr, o, true)
 		if err != nil {
 			switch e := err.(type) {
 			case *maelstrom.RPCError:
 				if e.Code == maelstrom.PreconditionFailed {
-					log.Printf("error storing commit offset in LinKV for key %+v: %s", k, err)
+					log.Printf("handleCommitOffsets: PreconditionFailed error for key %+v: %s", k, err)
 				}
+			default:
+				log.Printf("handleCommitOffsets: error for key %+v: %s", k, err)
 			}
 		}
 	}
-	return response{Type: "commit_offsets_ok"}
+	return baseResponse{Type: "commit_offsets_ok"}
 }
 
-func (p *Program) handleListCommittedOffsets(body workload) response {
-	p.storageMtx.RLock()
-	defer p.storageMtx.RUnlock()
-
-	res := response{
-		Type:    "list_committed_offsets_ok",
-		Offsets: offset_list{},
-	}
-	for _, k := range body.Keys {
-		if key, ok := p.storage[k]; ok {
-			res.Offsets[k] = key.getCommittedOffset()
-		} else {
-			res.Offsets[k] = 0
-		}
-	}
-	return res
-}
-
-func (p *Program) handleListCommittedOffsetsKv(body workload) response {
-	res := response{
+func (p *Program) handleListCommittedOffsets(body workload) listCommittedOffsetsResponse {
+	res := listCommittedOffsetsResponse{
 		Type:    "list_committed_offsets_ok",
 		Offsets: offset_list{},
 	}
 	for _, k := range body.Keys {
 		kv, err := p.linKv.ReadInt(context.Background(), formatCommittedOffsetKey(k))
 		if err != nil {
-			log.Printf("error ReadIn on %s: %+v", k, err)
+			log.Printf("handleListCommittedOffsets: error ReadInt on %s: %+v", k, err)
 			res.Offsets[k] = 0
 		} else {
 			res.Offsets[k] = int64(kv)
+			p.getKeyStore(k).commitOffset(int64(kv))
 		}
 	}
 	return res
-}
-
-func (p *Program) getNewOffset() int64 {
-	p.lastOffsetMtx.Lock()
-	defer p.lastOffsetMtx.Unlock()
-
-	p.lastOffset += 1
-	return p.lastOffset
 }
 
 func (p *Program) storeMsgWorker() {
@@ -221,28 +229,16 @@ func (p *Program) storeMsgWorker() {
 	}
 }
 
-func (p *Program) storeMsg(key string, entry msgLog) {
-	p.storageMtx.Lock()
-	defer p.storageMtx.Unlock()
-
-	_, ok := p.storage[key]
-	if !ok {
-		ks := keyStore{
-			key:       key,
-			committed: 0,
-			logs:      []msgLog{},
-		}
-		p.storage[key] = &ks
+func (p *Program) getKeyStore(key string) *keyStore {
+	if ks, ok := p.storage[key]; ok {
+		return ks
 	}
-	p.storage[key].write(entry.msg, entry.offset)
-	// log.Printf("total %d keys in storage, stored msg %+v (%+v)\n", len(p.storage), res, p.storage)
+	ks := NewKeyStore(key)
+	p.storage[key] = ks
+	return ks
 }
 
 func (p *Program) Shutdown() {
 	close(p.storageChan)
 	wg.Wait()
-}
-
-func formatCommittedOffsetKey(key string) string {
-	return fmt.Sprintf("co_%s", key)
 }

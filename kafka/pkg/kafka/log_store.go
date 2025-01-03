@@ -1,7 +1,7 @@
 package kafka
 
 import (
-	"fmt"
+	"sync"
 )
 
 type msgLog struct {
@@ -12,36 +12,49 @@ type msgLog struct {
 type keyStore struct {
 	key       string
 	committed int64
-	logs      []msgLog
+	mtx       *sync.RWMutex
+	offsets   []int64
 }
 
-func (k *keyStore) write(msg, offset int64) msgLog {
-	l := msgLog{
-		offset: offset,
-		msg:    msg,
+func NewKeyStore(key string) *keyStore {
+	return &keyStore{
+		key:       key,
+		committed: 0,
+		mtx:       &sync.RWMutex{},
+		offsets:   []int64{},
 	}
-	k.logs = append(k.logs, l)
-	return l
 }
 
-func (k *keyStore) read(offset int64) []msgLog {
-	res := []msgLog{}
-	for _, l := range k.logs {
-		if l.offset >= offset {
+func (k *keyStore) store(offset int64) {
+	k.mtx.Lock()
+	defer k.mtx.Unlock()
+
+	k.offsets = append(k.offsets, offset)
+}
+
+func (k *keyStore) getOffsets(offset int64) []int64 {
+	k.mtx.RLock()
+	defer k.mtx.RUnlock()
+
+	res := []int64{}
+	for _, l := range k.offsets {
+		if l >= offset {
 			res = append(res, l)
 		}
 	}
 	return res
 }
 
-func (k *keyStore) commitOffset(offset int64) error {
-	if offset < k.committed {
-		return fmt.Errorf("offset %d is older than already committed offset %d", offset, k.committed)
-	}
+func (k *keyStore) commitOffset(offset int64) {
+	k.mtx.Lock()
+	defer k.mtx.Unlock()
+
 	k.committed = offset
-	return nil
 }
 
 func (k *keyStore) getCommittedOffset() int64 {
+	k.mtx.RLock()
+	defer k.mtx.RUnlock()
+
 	return k.committed
 }

@@ -1,502 +1,573 @@
 package kafka
 
 import (
-	"fmt"
-	"reflect"
+	"context"
 	"sync"
 	"testing"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
+	"github.com/stretchr/testify/assert"
 )
 
-func TestHandleSend(t *testing.T) {
+func TestGetNextOffset(t *testing.T) {
 	tests := []struct {
-		name     string
-		body     workload
-		expected response
+		name           string
+		initialOffset  int
+		expectedOffset int64
+		kvReadErr      error
+		kvCasErr       error
+		casCalledTimes int
 	}{
 		{
-			name: "Single Message",
-			body: workload{
-				Type: "send",
-				Key:  "testKey",
-				Msg:  100,
-			},
-			expected: response{
-				Type:   "send_ok",
-				Offset: LAST_OFFSET_START + 1,
-			},
+			name:           "initial offset 0",
+			initialOffset:  0,
+			expectedOffset: 1,
+			kvCasErr:       nil,
+			casCalledTimes: 1,
+		},
+		{
+			name:           "initial offset 5",
+			initialOffset:  5,
+			expectedOffset: 6,
+			kvCasErr:       nil,
+			casCalledTimes: 1,
+		},
+		{
+			name:           "non-precondition failure, error returned",
+			initialOffset:  0,
+			expectedOffset: 1,
+			kvCasErr:       maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "KV error"),
+			casCalledTimes: 1,
+		},
+		{
+			name:           "cas failure, should retry",
+			initialOffset:  5,
+			expectedOffset: 6,
+			kvCasErr:       maelstrom.NewRPCError(maelstrom.PreconditionFailed, "Cas error"),
+			casCalledTimes: 2,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockNode := NewMockNode()
 			mockLinKV := NewMockKV()
-			mockSeqKV := NewMockKV()
+			mockLinKV.ReturnValueInt = tt.initialOffset
+			mockLinKV.ReturnReadError = tt.kvReadErr
+			mockLinKV.ReturnCasError = tt.kvCasErr
 
+			mockSeqKV := NewMockKV()
+			mockNode := NewMockNode("n1")
 			p := New(mockNode, mockLinKV, mockSeqKV)
 
-			resp := p.handleSend(tt.body)
-
-			if resp.Type != tt.expected.Type || resp.Offset != tt.expected.Offset {
-				t.Errorf("expected response %+v, got %+v", tt.expected, resp)
-			}
-		})
-	}
-}
-
-func TestHandlePoll(t *testing.T) {
-	tests := []struct {
-		name     string
-		key      string
-		body     workload
-		expected response
-	}{
-		{
-			name: "No Messages",
-			key:  "testKey",
-			body: workload{
-				Type:    "poll",
-				Offsets: offset_list{"testKey": 0},
-			},
-			expected: response{
-				Type: "poll_ok",
-				Msgs: message_list{"testKey": {}},
-			},
-		},
-		{
-			name: "Single Message",
-			key:  "testKey",
-			body: workload{
-				Type:    "poll",
-				Offsets: offset_list{"testKey": 0},
-			},
-			expected: response{
-				Type: "poll_ok",
-				Msgs: message_list{"testKey": {{101, 100}}},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := maelstrom.NewNode()
-			p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
-			if tt.body.Type == "poll" && len(tt.expected.Msgs[tt.key]) > 0 {
-				for _, ml := range tt.expected.Msgs[tt.key] {
-					p.storeMsg(tt.key, msgLog{ml[0], ml[1]})
-				}
-			}
-
-			resp := p.handlePoll(tt.body)
-			if resp.Type != tt.expected.Type || fmt.Sprint(resp.Msgs) != fmt.Sprint(tt.expected.Msgs) {
-				t.Errorf("expected response %+v, got %+v", tt.expected, resp)
-			}
-		})
-	}
-}
-
-func TestHandleCommitOffsets(t *testing.T) {
-	tests := []struct {
-		name     string
-		key      string
-		body     workload
-		expected response
-	}{
-		{
-			name: "Successful Commit",
-			key:  "testKey",
-			body: workload{
-				Type:    "commit_offsets",
-				Offsets: offset_list{"testKey": 101},
-			},
-			expected: response{
-				Type: "commit_offsets_ok",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := maelstrom.NewNode()
-			p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
-			p.storage[tt.key] = &keyStore{
-				logs: []msgLog{{offset: 101, msg: 100}},
-			}
-
-			resp := p.handleCommitOffsets(tt.body)
-			if resp.Type != tt.expected.Type {
-				t.Errorf("expected response %+v, got %+v", tt.expected, resp)
-			}
-		})
-	}
-}
-
-func TestHandleListCommittedOffsets(t *testing.T) {
-	tests := []struct {
-		name     string
-		body     workload
-		storage  map[string]*keyStore
-		expected response
-	}{
-		{
-			name: "Single Key",
-			body: workload{
-				Type: "list_committed_offsets",
-				Keys: []string{"k1"},
-			},
-			storage: map[string]*keyStore{
-				"k1": {
-					key:       "k1",
-					committed: 101,
-					logs:      []msgLog{{offset: 101, msg: 100}},
-				},
-			},
-			expected: response{
-				Type:    "list_committed_offsets_ok",
-				Offsets: offset_list{"k1": 101},
-			},
-		},
-		{
-			name: "Multiple Keys",
-			body: workload{
-				Type: "list_committed_offsets",
-				Keys: []string{"k1", "k2", "k3"},
-			},
-			storage: map[string]*keyStore{
-				"k1": {
-					key:       "k1",
-					committed: 101,
-				},
-				"k2": {
-					key:       "k2",
-					committed: 42,
-				},
-				"k3": {
-					key:       "k3",
-					committed: 350,
-				},
-			},
-			expected: response{
-				Type:    "list_committed_offsets_ok",
-				Offsets: offset_list{"k1": 101, "k2": 42, "k3": 350},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := maelstrom.NewNode()
-			p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
-			p.storage = tt.storage
-
-			resp := p.handleListCommittedOffsets(tt.body)
-			if resp.Type != tt.expected.Type || !reflect.DeepEqual(resp.Offsets, tt.expected.Offsets) {
-				t.Errorf("expected response %+v, got %+v", tt.expected, resp)
-			}
-		})
-	}
-}
-
-func TestGetNewOffset(t *testing.T) {
-	tests := []struct {
-		name     string
-		initial  int64
-		expected int64
-	}{
-		{
-			name:     "First Call",
-			initial:  LAST_OFFSET_START,
-			expected: LAST_OFFSET_START + 1,
-		},
-		{
-			name:     "Subsequent Calls",
-			initial:  200,
-			expected: 201,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			p := Program{
-				lastOffset:    tt.initial,
-				lastOffsetMtx: &sync.Mutex{},
-			}
-			offset := p.getNewOffset()
-			if offset != tt.expected {
-				t.Errorf("expected offset %d, got %d", tt.expected, offset)
-			}
+			offset := p.getNextOffset()
+			assert.Equal(t, tt.expectedOffset, offset)
+			assert.Equal(t, tt.casCalledTimes, mockLinKV.CasCalled)
 		})
 	}
 }
 
 func TestStoreMsg(t *testing.T) {
 	tests := []struct {
-		name     string
-		key      string
-		entry    msgLog
-		expected map[string]*keyStore
+		name            string
+		key             string
+		entry           msgLog
+		initialStorage  map[string]*keyStore
+		expectedOffsets []int64
+		kvWriteError    error
 	}{
 		{
-			name: "New Key",
-			key:  "testKey1",
-			entry: msgLog{
-				offset: 101,
-				msg:    100,
-			},
-			expected: map[string]*keyStore{
-				"testKey1": {
-					key:       "testKey1",
-					committed: 0,
-					logs:      []msgLog{{offset: 101, msg: 100}},
-				},
-			},
+			name:            "new key",
+			key:             "k1",
+			entry:           msgLog{offset: 1, msg: 100},
+			initialStorage:  map[string]*keyStore{},
+			expectedOffsets: []int64{1},
 		},
 		{
-			name: "Existing Key",
-			key:  "testKey2",
-			entry: msgLog{
-				offset: 201,
-				msg:    200,
-			},
-			expected: map[string]*keyStore{
-				"testKey2": {
-					key:       "testKey2",
+			name:  "existing key",
+			key:   "k1",
+			entry: msgLog{offset: 2, msg: 200},
+			initialStorage: map[string]*keyStore{
+				"k1": {
+					key:       "k1",
 					committed: 0,
-					logs:      []msgLog{{offset: 201, msg: 200}},
+					mtx:       &sync.RWMutex{},
+					offsets:   []int64{1},
 				},
 			},
+			expectedOffsets: []int64{1, 2},
+		},
+		{
+			name:            "kv write error",
+			key:             "k1",
+			entry:           msgLog{offset: 1, msg: 100},
+			initialStorage:  map[string]*keyStore{},
+			expectedOffsets: []int64{1}, // offset is still stored locally
+			kvWriteError:    context.Canceled,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n := maelstrom.NewNode()
-			p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
+			mockLinKV := NewMockKV()
+			mockSeqKV := NewMockKV()
+			mockNode := NewMockNode("n1")
+			p := New(mockNode, mockLinKV, mockSeqKV)
+
+			p.storage = tt.initialStorage
+			mockLinKV.ReturnWriteError = tt.kvWriteError
+
 			p.storeMsg(tt.key, tt.entry)
-			if len(p.storage) != 1 {
-				t.Errorf("expected storage to contain 1 key, got %d", len(p.storage))
+
+			ks, ok := p.storage[tt.key]
+			if !ok && len(tt.expectedOffsets) > 0 {
+				t.Errorf("key %s not found in storage", tt.key)
 			}
 
-			actualKeyStore := p.storage[tt.key]
-			if actualKeyStore == nil || len(actualKeyStore.logs) != 1 ||
-				actualKeyStore.logs[0].offset != tt.entry.offset || actualKeyStore.logs[0].msg != tt.entry.msg {
-				t.Errorf("expected key store %+v, got %+v", tt.expected, p.storage)
+			if ok {
+				ks.mtx.RLock()
+				assert.Equal(t, tt.expectedOffsets, ks.offsets)
+				ks.mtx.RUnlock()
 			}
+
+			if tt.kvWriteError != nil {
+				assert.Equal(t, formatMsgKey(tt.key, tt.entry.offset), mockSeqKV.LastKey)
+				assert.Equal(t, tt.entry.msg, mockSeqKV.LastValue)
+				assert.Equal(t, 1, mockSeqKV.WriteCalled)
+
+			}
+
 		})
 	}
-
-	// Concurrency test: multiple writes to the same key
-	t.Run("Concurrency", func(t *testing.T) {
-		const numMessages = 1000
-		n := maelstrom.NewNode()
-		p := New(n, maelstrom.NewLinKV(n), maelstrom.NewSeqKV(n))
-
-		var wg sync.WaitGroup
-		wg.Add(numMessages)
-
-		for i := 0; i < numMessages; i++ {
-			go func(i int) {
-				defer wg.Done()
-				p.storeMsg("concurrentKey", msgLog{offset: int64(i), msg: int64(i)})
-			}(i)
-		}
-
-		wg.Wait()
-
-		keyStore, ok := p.storage["concurrentKey"]
-		if !ok || len(keyStore.logs) != numMessages {
-			t.Errorf("expected key store with %d logs for 'concurrentKey', got %+v", numMessages, keyStore)
-		}
-	})
 }
 
-func TestHandleCommitOffsetsKv(t *testing.T) {
+func TestHandleSend(t *testing.T) {
 	tests := []struct {
-		name            string
-		body            workload
-		storage         map[string]*keyStore
-		kvError         error
-		expectedKvCalls int
+		name           string
+		body           workload
+		initialOffset  int
+		expectedOffset int64
+		expectedMsg    int64
+		kvCasError     error
 	}{
 		{
-			name: "Single Key Commit",
-			body: workload{
-				Type:    "commit_offsets",
-				Offsets: offset_list{"k1": 101},
+			name:           "basic send",
+			body:           workload{MessageBody: maelstrom.MessageBody{}, Type: "send", Key: "k1", Msg: 123},
+			initialOffset:  0,
+			expectedOffset: 1,
+			expectedMsg:    123,
+		},
+		{
+			name:           "send with existing offset",
+			body:           workload{MessageBody: maelstrom.MessageBody{}, Type: "send", Key: "k2", Msg: 456},
+			initialOffset:  5,
+			expectedOffset: 6,
+			expectedMsg:    456,
+		},
+		{
+			name:           "cas error during offset increment",
+			body:           workload{MessageBody: maelstrom.MessageBody{}, Type: "send", Key: "k3", Msg: 789},
+			initialOffset:  10,
+			kvCasError:     maelstrom.NewRPCError(maelstrom.PreconditionFailed, "CAS error"), // Will retry and eventually succeed in the mock
+			expectedOffset: 11,                                                               // Should still get the next offset eventually
+			expectedMsg:    789,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockLinKV := NewMockKV()
+			mockLinKV.ReturnValueInt = tt.initialOffset
+			mockLinKV.ReturnCasError = tt.kvCasError
+			mockSeqKV := NewMockKV()
+			mockNode := NewMockNode("n1")
+
+			p := New(mockNode, mockLinKV, mockSeqKV)
+			resp := p.handleSend(tt.body)
+
+			assert.Equal(t, "send_ok", resp.Type)
+			assert.Equal(t, tt.expectedOffset, resp.Offset)
+
+			// Check if the message was sent to the storage channel
+			select {
+			case storedMsgs := <-p.storageChan:
+				assert.Contains(t, storedMsgs, tt.body.Key)
+				assert.Equal(t, tt.expectedOffset, storedMsgs[tt.body.Key].offset)
+				assert.Equal(t, tt.expectedMsg, storedMsgs[tt.body.Key].msg)
+			default:
+				t.Fatal("Message not sent to storage channel")
+			}
+
+		})
+	}
+}
+
+func TestHandlePoll(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         workload
+		storage      map[string]*keyStore
+		kvReadData   map[string]any
+		kvReadError  error
+		expectedMsgs message_list
+	}{
+		{
+			name: "no messages",
+			body: workload{Offsets: map[string]int64{"k1": 0}},
+			storage: map[string]*keyStore{
+				"k1": NewKeyStore("k1"), // Empty keystore
 			},
+			expectedMsgs: message_list{"k1": [][2]int64{}},
+		},
+		{
+			name: "single message",
+			body: workload{Offsets: map[string]int64{"k1": 0}},
 			storage: map[string]*keyStore{
 				"k1": {
 					key:       "k1",
 					committed: 0,
-					logs:      []msgLog{{offset: 101, msg: 100}},
+					mtx:       &sync.RWMutex{},
+					offsets:   []int64{1},
 				},
 			},
-			kvError:         nil,
-			expectedKvCalls: 1,
+			kvReadData: map[string]any{
+				formatMsgKey("k1", 1): 100,
+			},
+			expectedMsgs: message_list{
+				"k1": [][2]int64{{1, 100}},
+			},
 		},
 		{
-			name: "Multiple Keys Commit",
-			body: workload{
-				Type:    "commit_offsets",
-				Offsets: offset_list{"k1": 101, "k2": 102},
-			},
+			name: "multiple messages, different offsets",
+			body: workload{Offsets: map[string]int64{"k1": 2}},
 			storage: map[string]*keyStore{
-				"k1": {key: "k1", committed: 0},
-				"k2": {key: "k2", committed: 0},
+				"k1": {
+					key:       "k1",
+					committed: 0,
+					mtx:       &sync.RWMutex{},
+					offsets:   []int64{1, 2, 3},
+				},
 			},
-			kvError:         nil,
-			expectedKvCalls: 2,
+			kvReadData: map[string]any{
+				formatMsgKey("k1", 2): 200,
+				formatMsgKey("k1", 3): 300,
+			},
+			expectedMsgs: message_list{
+				"k1": [][2]int64{{2, 200}, {3, 300}},
+			},
 		},
 		{
-			name: "Key Not Found Error",
-			body: workload{
-				Type:    "commit_offsets",
-				Offsets: offset_list{"k1": 101},
-			},
-			storage:         map[string]*keyStore{}, // Empty storage to simulate key not found
-			kvError:         maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "key not found"),
-			expectedKvCalls: 1,
-		},
-		{
-			name: "Mixed Keys - Some Found Some Not",
-			body: workload{
-				Type:    "commit_offsets",
-				Offsets: offset_list{"k1": 101, "k2": 102, "k3": 103},
-			},
+			name: "multiple keys",
+			body: workload{Offsets: map[string]int64{"k1": 0, "k2": 0}},
 			storage: map[string]*keyStore{
-				"k1": {key: "k1", committed: 0},
-				// k2 not found
-				"k3": {key: "k3", committed: 0},
+				"k1": {
+					key:       "k1",
+					committed: 0,
+					mtx:       &sync.RWMutex{},
+					offsets:   []int64{1},
+				},
+				"k2": {
+					key:       "k2",
+					committed: 0,
+					mtx:       &sync.RWMutex{},
+					offsets:   []int64{2},
+				},
 			},
-			kvError:         maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "key not found"),
-			expectedKvCalls: 3,
+			kvReadData: map[string]any{
+				formatMsgKey("k1", 1): 100,
+				formatMsgKey("k2", 2): 200,
+			},
+			expectedMsgs: message_list{
+				"k1": [][2]int64{{1, 100}},
+				"k2": [][2]int64{{2, 200}},
+			},
+		},
+		{
+			name: "kv read error",
+			body: workload{Offsets: map[string]int64{"k1": 0}},
+			storage: map[string]*keyStore{
+				"k1": {
+					key:       "k1",
+					committed: 0,
+					mtx:       &sync.RWMutex{},
+					offsets:   []int64{1},
+				},
+			},
+			kvReadError:  maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "Read error"),
+			expectedMsgs: message_list{"k1": [][2]int64{}},
+		},
+		{
+			name: "many multiple keys very long",
+			body: workload{Offsets: map[string]int64{"k1": 3, "k2": 22, "k3": 50}},
+			storage: map[string]*keyStore{
+				"k1": {
+					key:     "k1",
+					mtx:     &sync.RWMutex{},
+					offsets: getOffsets(1, 16),
+				},
+				"k2": {
+					key:     "k2",
+					mtx:     &sync.RWMutex{},
+					offsets: getOffsets(10, 40),
+				},
+				"k3": {
+					key:     "k3",
+					mtx:     &sync.RWMutex{},
+					offsets: getOffsets(1, 100),
+				},
+			},
+			kvReadData: func() map[string]any {
+				data := make(map[string]any)
+				getKvReadData(&data, "k1", 1, 16)
+				getKvReadData(&data, "k2", 10, 40)
+				getKvReadData(&data, "k3", 1, 100)
+				return data
+			}(),
+			expectedMsgs: message_list{
+				"k1": getMessages(3, 3+MAX_POLL_LIST_LENGTH),
+				"k2": getMessages(22, 22+MAX_POLL_LIST_LENGTH),
+				"k3": getMessages(50, 50+MAX_POLL_LIST_LENGTH),
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockNode := NewMockNode()
-			mockKV := NewMockKV()
-			mockKV.ReturnError = tt.kvError
+			mockLinKV := NewMockKV()
+			mockSeqKV := NewMockKV()
+			mockSeqKV.ReturnValues = tt.kvReadData
+			mockSeqKV.ReturnReadError = tt.kvReadError
 
-			p := Program{
-				node:       mockNode,
-				linKv:      mockKV,
-				storage:    tt.storage,
-				storageMtx: &sync.RWMutex{},
-			}
+			mockNode := NewMockNode("n1")
+			p := New(mockNode, mockLinKV, mockSeqKV)
+			p.storage = tt.storage
 
-			resp := p.handleCommitOffsetsKv(tt.body)
+			resp := p.handlePoll(tt.body)
 
-			// Check response type
-			if resp.Type != "commit_offsets_ok" {
-				t.Errorf("expected response type 'commit_offsets_ok', got %s", resp.Type)
+			assert.Equal(t, "poll_ok", resp.Type)
+			for k, m := range resp.Msgs {
+				assert.LessOrEqualf(t, len(m), MAX_POLL_LIST_LENGTH, "list size %d for poll response on %s exceeds set limit of %d (via const MAX_POLL_LIST_LENGTH)", len(m), k, MAX_POLL_LIST_LENGTH)
 			}
-
-			// Verify CompareAndSwap was called
-			if !mockKV.CompareAndSwapCalled {
-				t.Error("expected CompareAndSwap to be called")
-			}
-
-			// Count CompareAndSwap calls
-			casCount := 0
-			for range tt.body.Offsets {
-				casCount++
-			}
-			if casCount != tt.expectedKvCalls {
-				t.Errorf("expected %d CompareAndSwap calls, got %d", tt.expectedKvCalls, casCount)
-			}
-
-			// For key not found cases, verify the error was logged
-			// You might want to add a mock logger to capture and verify log messages
-			if tt.kvError != nil {
-				switch e := tt.kvError.(type) {
-				case *maelstrom.RPCError:
-					if e.Code != maelstrom.KeyDoesNotExist {
-						t.Errorf("expected KeyDoesNotExist error, got %v", e)
-					}
-				}
-			}
+			assert.Equal(t, tt.expectedMsgs, resp.Msgs)
 		})
 	}
 }
 
-func TestHandleListCommittedOffsetsKv(t *testing.T) {
+func TestHandleCommitOffsets(t *testing.T) {
 	tests := []struct {
-		name           string
-		body           workload
-		kvReturnValue  int
-		kvError        error
-		expectedOffset offset_list
+		name              string
+		body              workload
+		initialStorage    map[string]*keyStore
+		initialCommitted  map[string]int
+		expectedCommitted map[string]int64
+		kvCasError        error
+		expectedCasCalls  int
 	}{
 		{
-			name: "Single Key List",
-			body: workload{
-				Type: "list_committed_offsets",
-				Keys: []string{"k1"},
+			name: "commit single offset",
+			body: workload{Offsets: map[string]int64{"k1": 10}},
+			initialStorage: map[string]*keyStore{
+				"k1": {key: "k1", committed: 5, mtx: &sync.RWMutex{}},
 			},
-			kvReturnValue:  101,
-			kvError:        nil,
-			expectedOffset: offset_list{"k1": 101},
+			initialCommitted:  map[string]int{formatCommittedOffsetKey("k1"): 5},
+			expectedCommitted: map[string]int64{"k1": 10},
+			expectedCasCalls:  1,
 		},
 		{
-			name: "Multiple Keys List",
-			body: workload{
-				Type: "list_committed_offsets",
-				Keys: []string{"k1", "k2"},
+			name: "commit multiple offsets",
+			body: workload{Offsets: map[string]int64{"k1": 10, "k2": 20}},
+			initialStorage: map[string]*keyStore{
+				"k1": {key: "k1", committed: 5, mtx: &sync.RWMutex{}},
+				"k2": {key: "k2", committed: 15, mtx: &sync.RWMutex{}},
 			},
-			kvReturnValue:  42,
-			kvError:        nil,
-			expectedOffset: offset_list{"k1": 42, "k2": 42},
+			initialCommitted: map[string]int{
+				formatCommittedOffsetKey("k1"): 5,
+				formatCommittedOffsetKey("k2"): 15,
+			},
+			expectedCommitted: map[string]int64{"k1": 10, "k2": 20},
+			expectedCasCalls:  2,
 		},
 		{
-			name: "Key Not Found",
-			body: workload{
-				Type: "list_committed_offsets",
-				Keys: []string{"k1"},
+			name: "commit offset for non-existent key",
+			body: workload{Offsets: map[string]int64{"k3": 30}},
+			initialStorage: map[string]*keyStore{
+				"k1": {key: "k1", committed: 5, mtx: &sync.RWMutex{}},
+				"k2": {key: "k2", committed: 15, mtx: &sync.RWMutex{}},
 			},
-			kvReturnValue:  0,
-			kvError:        maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "key not found"),
-			expectedOffset: offset_list{"k1": 0},
+			initialCommitted: map[string]int{
+				formatCommittedOffsetKey("k1"): 5,
+				formatCommittedOffsetKey("k2"): 15,
+			},
+			expectedCommitted: map[string]int64{"k1": 5, "k2": 15, "k3": 30},
+			expectedCasCalls:  1,
+		},
+		{
+			name: "cas error",
+			body: workload{Offsets: map[string]int64{"k1": 10}},
+			initialStorage: map[string]*keyStore{
+				"k1": {key: "k1", committed: 5, mtx: &sync.RWMutex{}},
+			},
+			initialCommitted:  map[string]int{formatCommittedOffsetKey("k1"): 5},
+			kvCasError:        maelstrom.NewRPCError(maelstrom.PreconditionFailed, "CAS error"),
+			expectedCommitted: map[string]int64{"k1": 10}, //Local storage is updated regardless
+			expectedCasCalls:  1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockNode := NewMockNode()
-			mockKV := NewMockKV()
-			mockKV.ReturnValue = tt.kvReturnValue
-			mockKV.ReturnError = tt.kvError
+			mockLinKV := NewMockKV()
+			mockSeqKV := NewMockKV()
+			mockNode := NewMockNode("n1")
+			p := New(mockNode, mockLinKV, mockSeqKV)
 
-			p := Program{
-				node:       mockNode,
-				linKv:      mockKV,
-				storageMtx: &sync.RWMutex{},
+			for k, v := range tt.initialCommitted {
+				mockLinKV.ReturnValues[k] = v
 			}
+			mockLinKV.ReturnCasError = tt.kvCasError
 
-			resp := p.handleListCommittedOffsetsKv(tt.body)
+			p.storage = tt.initialStorage
 
-			if resp.Type != "list_committed_offsets_ok" {
-				t.Errorf("expected response type 'list_committed_offsets_ok', got %s", resp.Type)
-			}
+			resp := p.handleCommitOffsets(tt.body)
 
-			if !reflect.DeepEqual(resp.Offsets, tt.expectedOffset) {
-				t.Errorf("expected offsets %v, got %v", tt.expectedOffset, resp.Offsets)
-			}
+			assert.Equal(t, "commit_offsets_ok", resp.Type)
 
-			if mockKV.ReadIntCalled != true {
-				t.Error("expected ReadInt to be called")
-			}
+			for k, expectedOffset := range tt.expectedCommitted {
+				ks, ok := p.storage[k]
+				assert.Truef(t, ok, "key (%s) should exist in local storage: %+v", k, p.storage)
+				if ok {
+					assert.Equal(t, expectedOffset, ks.committed)
+				}
 
-			readCount := 0
-			for range tt.body.Keys {
-				readCount++
 			}
-			if readCount != len(tt.body.Keys) {
-				t.Errorf("expected %d ReadInt calls, got %d", len(tt.body.Keys), readCount)
-			}
+			assert.Equal(t, tt.expectedCasCalls, mockLinKV.CasCalled)
+
 		})
 	}
+}
+
+func TestHandleListCommittedOffsets(t *testing.T) {
+	tests := []struct {
+		name            string
+		body            workload
+		kvReturnValues  map[string]int
+		kvReadError     error
+		expectedOffsets offset_list
+	}{
+		{
+			name:            "list single offset",
+			body:            workload{Keys: []string{"k1"}},
+			kvReturnValues:  map[string]int{formatCommittedOffsetKey("k1"): 10},
+			expectedOffsets: offset_list{"k1": 10},
+		},
+		{
+			name:            "list multiple offsets",
+			body:            workload{Keys: []string{"k1", "k2"}},
+			kvReturnValues:  map[string]int{formatCommittedOffsetKey("k1"): 10, formatCommittedOffsetKey("k2"): 20},
+			expectedOffsets: offset_list{"k1": 10, "k2": 20},
+		},
+		{
+			name:            "list offset for non-existent key",
+			body:            workload{Keys: []string{"k3"}},
+			kvReturnValues:  map[string]int{formatCommittedOffsetKey("k1"): 10, formatCommittedOffsetKey("k2"): 20},
+			expectedOffsets: offset_list{"k3": 0}, // Expect 0 for non-existent keys
+		},
+		{
+			name:            "kv read error",
+			body:            workload{Keys: []string{"k1"}},
+			kvReturnValues:  map[string]int{formatCommittedOffsetKey("k1"): 10},
+			kvReadError:     context.Canceled,
+			expectedOffsets: offset_list{"k1": 0}, // Expect 0 on read error
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockLinKV := NewMockKV()
+			mockSeqKV := NewMockKV()
+			mockNode := NewMockNode("n1")
+
+			for k, v := range tt.kvReturnValues {
+				mockLinKV.ReturnValues[k] = v // or mockSeqKV if you use a seq kv
+			}
+			mockLinKV.ReturnReadError = tt.kvReadError
+			p := New(mockNode, mockLinKV, mockSeqKV)
+
+			resp := p.handleListCommittedOffsets(tt.body)
+
+			assert.Equal(t, "list_committed_offsets_ok", resp.Type)
+			assert.Equal(t, tt.expectedOffsets, resp.Offsets)
+			assert.Equal(t, len(tt.body.Keys), mockLinKV.ReadIntCalled) // Assert the correct number of read calls
+
+		})
+	}
+}
+
+func TestGetKeyStore(t *testing.T) {
+	tests := []struct {
+		name             string
+		key              string
+		initialStorage   map[string]*keyStore
+		expectedKeyStore *keyStore
+	}{
+		{
+			name:             "Key exists",
+			key:              "k1",
+			initialStorage:   map[string]*keyStore{"k1": {key: "k1", committed: 0, mtx: &sync.RWMutex{}}},
+			expectedKeyStore: &keyStore{key: "k1", committed: 0, mtx: &sync.RWMutex{}},
+		},
+		{
+			name:             "Key does not exist",
+			key:              "k2",
+			initialStorage:   map[string]*keyStore{"k1": {key: "k1", committed: 0, mtx: &sync.RWMutex{}}},
+			expectedKeyStore: &keyStore{key: "k2", committed: 0, mtx: &sync.RWMutex{}},
+		},
+		{
+			name:             "Empty storage",
+			key:              "k1",
+			initialStorage:   map[string]*keyStore{},
+			expectedKeyStore: &keyStore{key: "k1", committed: 0, mtx: &sync.RWMutex{}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			mockLinKV := NewMockKV()
+			mockSeqKV := NewMockKV()
+			mockNode := NewMockNode("n1")
+			p := New(mockNode, mockLinKV, mockSeqKV)
+
+			p.storage = tt.initialStorage
+
+			ks := p.getKeyStore(tt.key)
+
+			// Don't compare mutexes directly.
+			assert.NotNil(t, ks)
+			assert.Equal(t, tt.expectedKeyStore.key, ks.key)
+			assert.Equal(t, tt.expectedKeyStore.committed, ks.committed)
+			assert.Contains(t, p.storage, tt.key)
+			assert.Same(t, ks, p.storage[tt.key])
+		})
+	}
+}
+
+func getOffsets(start, end int) []int64 {
+	data := make([]int64, 0)
+	for i := start; i <= end; i++ {
+		data = append(data, int64(i))
+	}
+	return data
+}
+
+func getKvReadData(data *map[string]any, key string, start, end int) {
+	for i := start; i <= end; i++ {
+		(*data)[formatMsgKey(key, int64(i))] = int(i + 100)
+	}
+}
+
+func getMessages(start, end int) [][2]int64 {
+	msgs := [][2]int64{}
+	for i := start; i < end; i++ {
+		msgs = append(msgs, [2]int64{int64(i), int64(i + 100)})
+	}
+	return msgs
 }

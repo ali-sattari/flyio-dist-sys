@@ -140,6 +140,59 @@ func TestStoreMsg(t *testing.T) {
 	}
 }
 
+func TestHandleInit(t *testing.T) {
+	tests := []struct {
+		name         string
+		node         string
+		nodeIDs      []string
+		expectedTopo []string
+	}{
+		{
+			name:         "Single node",
+			node:         "n1",
+			nodeIDs:      []string{"n1"},
+			expectedTopo: []string{},
+		},
+		{
+			name:         "Multiple nodes",
+			node:         "n1",
+			nodeIDs:      []string{"n1", "n2", "n3"},
+			expectedTopo: []string{"n2", "n3"},
+		},
+		{
+			name:         "Node with itself",
+			node:         "n1",
+			nodeIDs:      []string{"n1", "n1", "n2"},
+			expectedTopo: []string{"n2"},
+		},
+		{
+			name:         "Empty node list",
+			node:         "n1",
+			nodeIDs:      []string{},
+			expectedTopo: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockNode := &MockNode{
+				NodeID:     tt.node,
+				NodeIdList: tt.nodeIDs,
+			}
+			p := Program{
+				node: mockNode,
+				topo: []string{},
+			}
+
+			resp := p.handleInit()
+
+			assert.Equal(t, "init_ok", resp.Type)
+			assert.Equal(t, tt.expectedTopo, p.topo)
+
+		})
+	}
+}
+
 func TestHandleSend(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -181,7 +234,13 @@ func TestHandleSend(t *testing.T) {
 			mockSeqKV := NewMockKV()
 			mockNode := NewMockNode("n1")
 
-			p := New(mockNode, mockLinKV, mockSeqKV)
+			// p := New(mockNode, mockLinKV, mockSeqKV)
+			p := Program{
+				node:        mockNode,
+				linKv:       mockLinKV,
+				seqKv:       mockSeqKV,
+				storageChan: make(chan map[string]msgLog, 5),
+			}
 			resp := p.handleSend(tt.body)
 
 			assert.Equal(t, "send_ok", resp.Type)
@@ -216,7 +275,7 @@ func TestHandlePoll(t *testing.T) {
 			storage: map[string]*keyStore{
 				"k1": NewKeyStore("k1"), // Empty keystore
 			},
-			expectedMsgs: message_list{"k1": [][2]int64{}},
+			expectedMsgs: message_list{"k1": []offset_msg_pair{}},
 		},
 		{
 			name: "single message",
@@ -233,7 +292,7 @@ func TestHandlePoll(t *testing.T) {
 				formatMsgKey("k1", 1): 100,
 			},
 			expectedMsgs: message_list{
-				"k1": [][2]int64{{1, 100}},
+				"k1": []offset_msg_pair{{1, 100}},
 			},
 		},
 		{
@@ -252,7 +311,7 @@ func TestHandlePoll(t *testing.T) {
 				formatMsgKey("k1", 3): 300,
 			},
 			expectedMsgs: message_list{
-				"k1": [][2]int64{{2, 200}, {3, 300}},
+				"k1": []offset_msg_pair{{2, 200}, {3, 300}},
 			},
 		},
 		{
@@ -277,8 +336,8 @@ func TestHandlePoll(t *testing.T) {
 				formatMsgKey("k2", 2): 200,
 			},
 			expectedMsgs: message_list{
-				"k1": [][2]int64{{1, 100}},
-				"k2": [][2]int64{{2, 200}},
+				"k1": []offset_msg_pair{{1, 100}},
+				"k2": []offset_msg_pair{{2, 200}},
 			},
 		},
 		{
@@ -293,7 +352,7 @@ func TestHandlePoll(t *testing.T) {
 				},
 			},
 			kvReadError:  maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "Read error"),
-			expectedMsgs: message_list{"k1": [][2]int64{}},
+			expectedMsgs: message_list{"k1": []offset_msg_pair{}},
 		},
 		{
 			name: "many multiple keys very long",
@@ -451,32 +510,32 @@ func TestHandleListCommittedOffsets(t *testing.T) {
 		body            workload
 		kvReturnValues  map[string]int
 		kvReadError     error
-		expectedOffsets offset_list
+		expectedOffsets key_offset_pair
 	}{
 		{
 			name:            "list single offset",
 			body:            workload{Keys: []string{"k1"}},
 			kvReturnValues:  map[string]int{formatCommittedOffsetKey("k1"): 10},
-			expectedOffsets: offset_list{"k1": 10},
+			expectedOffsets: key_offset_pair{"k1": 10},
 		},
 		{
 			name:            "list multiple offsets",
 			body:            workload{Keys: []string{"k1", "k2"}},
 			kvReturnValues:  map[string]int{formatCommittedOffsetKey("k1"): 10, formatCommittedOffsetKey("k2"): 20},
-			expectedOffsets: offset_list{"k1": 10, "k2": 20},
+			expectedOffsets: key_offset_pair{"k1": 10, "k2": 20},
 		},
 		{
 			name:            "list offset for non-existent key",
 			body:            workload{Keys: []string{"k3"}},
 			kvReturnValues:  map[string]int{formatCommittedOffsetKey("k1"): 10, formatCommittedOffsetKey("k2"): 20},
-			expectedOffsets: offset_list{"k3": 0}, // Expect 0 for non-existent keys
+			expectedOffsets: key_offset_pair{"k3": 0}, // Expect 0 for non-existent keys
 		},
 		{
 			name:            "kv read error",
 			body:            workload{Keys: []string{"k1"}},
 			kvReturnValues:  map[string]int{formatCommittedOffsetKey("k1"): 10},
 			kvReadError:     context.Canceled,
-			expectedOffsets: offset_list{"k1": 0}, // Expect 0 on read error
+			expectedOffsets: key_offset_pair{"k1": 0}, // Expect 0 on read error
 		},
 	}
 
@@ -564,10 +623,10 @@ func getKvReadData(data *map[string]any, key string, start, end int) {
 	}
 }
 
-func getMessages(start, end int) [][2]int64 {
-	msgs := [][2]int64{}
+func getMessages(start, end int) []offset_msg_pair {
+	msgs := []offset_msg_pair{}
 	for i := start; i < end; i++ {
-		msgs = append(msgs, [2]int64{int64(i), int64(i + 100)})
+		msgs = append(msgs, offset_msg_pair{int64(i), int64(i + 100)})
 	}
 	return msgs
 }

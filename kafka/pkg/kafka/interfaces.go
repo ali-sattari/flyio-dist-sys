@@ -12,7 +12,9 @@ type Node = maelstrom.Node
 // the methods we use from maelstrom.Node
 type NodeInterface interface {
 	ID() string
+	NodeIDs() []string
 	Run() error
+	Send(dest string, body any) error
 	Handle(rpcType string, handler maelstrom.HandlerFunc)
 	Reply(msg Message, body any) error
 }
@@ -38,8 +40,16 @@ func (m *MaelstromNodeWrapper) ID() string {
 	return m.node.ID()
 }
 
+func (m *MaelstromNodeWrapper) NodeIDs() []string {
+	return m.node.NodeIDs()
+}
+
 func (m *MaelstromNodeWrapper) Run() error {
 	return m.node.Run()
+}
+
+func (m *MaelstromNodeWrapper) Send(dest string, body any) error {
+	return m.node.Send(dest, body)
 }
 
 func (m *MaelstromNodeWrapper) Handle(rpcType string, handler maelstrom.HandlerFunc) {

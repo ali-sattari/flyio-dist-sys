@@ -16,7 +16,7 @@ func main() {
 	n := kafka.NewWrappedNode()
 	kfk := kafka.New(n, kafka.NewWrappedKV(n, "linear"), kafka.NewWrappedKV(n, "sequential"))
 
-	rpcs := []string{"send", "poll", "commit_offsets", "list_committed_offsets"}
+	rpcs := []string{"init", "send", "poll", "commit_offsets", "list_committed_offsets", "gossip", "gossip_ok"}
 	for _, r := range rpcs {
 		n.Handle(r, kfk.GetHandle(r))
 	}

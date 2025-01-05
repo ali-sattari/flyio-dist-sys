@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -17,20 +18,32 @@ type Program struct {
 
 	linKv KVInterface
 	seqKv KVInterface
+
+	topo      []string
+	gossiped  map[string][]gossipLog
+	ackMtx    *sync.Mutex
+	buffer    map[string]offset_list
+	bufMtx    *sync.Mutex
+	lastFlush time.Time
+	flushMtx  *sync.Mutex
 }
 
 type workload struct {
 	maelstrom.MessageBody
-	Type    string
-	Key     string
-	Keys    []string
-	Msg     int64
-	Offset  int64
-	Offsets map[string]int64
+	Type          string           `json:"type"`
+	Key           string           `json:"key,omitempty"`
+	Keys          []string         `json:"keys,omitempty"`
+	Msg           int64            `json:"msg,omitempty"`
+	Offset        int64            `json:"offset,omitempty"`
+	Offsets       map[string]int64 `json:"offsets,omitempty"`
+	GossipId      string           `json:"gossip_id,omitempty"`
+	GossipOffsets []int64          `json:"gossip_offsets,omitempty"`
 }
 
-type message_list map[string][][2]int64
-type offset_list map[string]int64
+type offset_msg_pair [2]int64
+type key_offset_pair map[string]int64
+type message_list map[string][]offset_msg_pair
+type offset_list map[string][]int64
 
 type baseResponse struct {
 	Type string `json:"type"`
@@ -44,8 +57,8 @@ type pollResponse struct {
 	Msgs message_list `json:"msgs"`
 }
 type listCommittedOffsetsResponse struct {
-	Type    string      `json:"type"`
-	Offsets offset_list `json:"offsets"`
+	Type    string          `json:"type"`
+	Offsets key_offset_pair `json:"offsets"`
 }
 
 var wg sync.WaitGroup
@@ -64,10 +77,23 @@ func New(n NodeInterface, linKv, seqKv KVInterface) Program {
 		storage:     map[string]*keyStore{},
 		storageMtx:  &sync.RWMutex{},
 		storageChan: make(chan map[string]msgLog, 5),
+		topo:        []string{},
+		gossiped:    map[string][]gossipLog{},
+		ackMtx:      &sync.Mutex{},
+		buffer:      map[string]offset_list{},
+		bufMtx:      &sync.Mutex{},
+		flushMtx:    &sync.Mutex{},
 	}
 
 	wg.Add(1)
 	go p.storeMsgWorker()
+
+	retrier := p.periodicJobs(1*time.Second, p.resendUnackedGossips)
+	flusher := p.periodicJobs(1+bufferAge, p.flushGossipBuffer)
+
+	wg.Add(2)
+	go retrier()
+	go flusher()
 
 	return p
 }
@@ -81,18 +107,37 @@ func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 
 		var resp any
 		switch rpc_type {
+		case "init":
+			resp = p.handleInit()
 		case "send":
 			resp = p.handleSend(body)
+			p.gossip(msg.Src, body.Key, resp.(sendResponse).Offset)
 		case "poll":
 			resp = p.handlePoll(body)
 		case "commit_offsets":
 			resp = p.handleCommitOffsets(body)
 		case "list_committed_offsets":
 			resp = p.handleListCommittedOffsets(body)
+		case "gossip":
+			resp = p.receiveGossip(body, msg)
+		case "gossip_ok":
+			p.ackGossip(body, msg)
+			return nil
+
 		}
 
 		return p.node.Reply(msg, resp)
 	}
+}
+
+func (p *Program) handleInit() baseResponse {
+	for _, n := range p.node.NodeIDs() {
+		if n != p.node.ID() {
+			p.topo = append(p.topo, n)
+		}
+	}
+	log.Printf("handleInit: topology for %s updated to: %+v", p.node.ID(), p.topo)
+	return baseResponse{Type: "init_ok"}
 }
 
 func (p *Program) handleSend(body workload) sendResponse {
@@ -110,17 +155,9 @@ func (p *Program) handleSend(body workload) sendResponse {
 }
 
 func (p *Program) storeMsg(key string, entry msgLog) {
-	_, ok := p.storage[key]
-	if !ok {
-		p.storage[key] = &keyStore{
-			key:       key,
-			committed: 0,
-			mtx:       &sync.RWMutex{},
-			offsets:   []int64{},
-		}
-	}
+	ks := p.getKeyStore(key)
 
-	p.storage[key].store(entry.offset)
+	ks.store(entry.offset)
 	err := p.seqKv.Write(context.Background(), formatMsgKey(key, entry.offset), entry.msg)
 	if err != nil {
 		log.Printf("storeMsg: error storing in KV %+v", err)
@@ -136,9 +173,11 @@ func (p *Program) getNextOffset() int64 {
 			switch e := err.(type) {
 			case *maelstrom.RPCError:
 				if e.Code == maelstrom.PreconditionFailed {
-					log.Printf("getNextOffset: PreconditionFailed on CAS failed for %d -> %d", current, next)
+					log.Printf("getNextOffset: CAS PreconditionFailed for %d -> %d", current, next)
 					continue
 				}
+			default:
+				log.Printf("getNextOffset: error %d -> %d: %s", current, next, err)
 			}
 		}
 		return int64(next)
@@ -148,31 +187,30 @@ func (p *Program) getNextOffset() int64 {
 func (p *Program) handlePoll(body workload) pollResponse {
 	logs := message_list{}
 	for k, o := range body.Offsets {
-		key, ok := p.storage[k]
-		logs[k] = [][2]int64{}
-		if ok {
-			count := 0
-			ol := key.getOffsets(o)
-			// log.Printf("handlePoll key offsets: %+v", ol)
-			for _, offset := range ol {
-				if count == MAX_POLL_LIST_LENGTH {
-					break
-				}
-				val, err := p.seqKv.ReadInt(context.Background(), formatMsgKey(k, offset))
-				// log.Printf("handlePoll: ReaInt for %s:%d -> %+v", k, offset, val)
-				if err != nil {
-					switch e := err.(type) {
-					case *maelstrom.RPCError:
-						if e.Code == maelstrom.KeyDoesNotExist {
-							log.Printf("handlePoll: KeyDoesNotExist on ReaInt for %s:%d", k, offset)
-							continue
-						}
+		ks := p.getKeyStore(k)
+		ol := ks.getOffsets(o)
+		logs[k] = []offset_msg_pair{}
+		count := 0
+		// log.Printf("handlePoll key offsets: %+v", ol)
+		for _, offset := range ol {
+			if count == MAX_POLL_LIST_LENGTH {
+				break
+			}
+			val, err := p.seqKv.ReadInt(context.Background(), formatMsgKey(k, offset))
+			// log.Printf("handlePoll: ReaInt for %s:%d -> %+v", k, offset, val)
+			if err != nil {
+				switch e := err.(type) {
+				case *maelstrom.RPCError:
+					if e.Code == maelstrom.KeyDoesNotExist {
+						log.Printf("handlePoll: KeyDoesNotExist on ReaInt for %s:%d", k, offset)
+						continue
 					}
 				}
-				logs[k] = append(logs[k], [2]int64{offset, int64(val)})
-				count++
 			}
+			logs[k] = append(logs[k], [2]int64{offset, int64(val)})
+			count++
 		}
+
 	}
 
 	res := pollResponse{
@@ -183,30 +221,37 @@ func (p *Program) handlePoll(body workload) pollResponse {
 }
 
 func (p *Program) handleCommitOffsets(body workload) baseResponse {
+	resp := baseResponse{Type: "commit_offsets_ok"}
 	for k, o := range body.Offsets {
 		ks := p.getKeyStore(k)
 		curr := ks.getCommittedOffset()
 		ks.commitOffset(o)
 
-		err := p.linKv.CompareAndSwap(context.Background(), formatCommittedOffsetKey(k), curr, o, true)
-		if err != nil {
-			switch e := err.(type) {
-			case *maelstrom.RPCError:
-				if e.Code == maelstrom.PreconditionFailed {
-					log.Printf("handleCommitOffsets: PreconditionFailed error for key %+v: %s", k, err)
-				}
-			default:
-				log.Printf("handleCommitOffsets: error for key %+v: %s", k, err)
-			}
+		if curr == o {
+			// skip linkv cas
+			return resp
 		}
+
+		_ = p.linKv.CompareAndSwap(context.Background(), formatCommittedOffsetKey(k), curr, o, true)
+		// err := p.linKv.CompareAndSwap(context.Background(), formatCommittedOffsetKey(k), curr, o, true)
+		// if err != nil {
+		// 	switch e := err.(type) {
+		// 	case *maelstrom.RPCError:
+		// 		if e.Code == maelstrom.PreconditionFailed {
+		// 			log.Printf("handleCommitOffsets: PreconditionFailed error for key %+v: %s", k, err)
+		// 		}
+		// 	default:
+		// 		log.Printf("handleCommitOffsets: error for key %+v: %s", k, err)
+		// 	}
+		// }
 	}
-	return baseResponse{Type: "commit_offsets_ok"}
+	return resp
 }
 
 func (p *Program) handleListCommittedOffsets(body workload) listCommittedOffsetsResponse {
 	res := listCommittedOffsetsResponse{
 		Type:    "list_committed_offsets_ok",
-		Offsets: offset_list{},
+		Offsets: key_offset_pair{},
 	}
 	for _, k := range body.Keys {
 		kv, err := p.linKv.ReadInt(context.Background(), formatCommittedOffsetKey(k))
@@ -230,6 +275,9 @@ func (p *Program) storeMsgWorker() {
 }
 
 func (p *Program) getKeyStore(key string) *keyStore {
+	p.storageMtx.Lock()
+	defer p.storageMtx.Unlock()
+
 	if ks, ok := p.storage[key]; ok {
 		return ks
 	}
@@ -241,4 +289,16 @@ func (p *Program) getKeyStore(key string) *keyStore {
 func (p *Program) Shutdown() {
 	close(p.storageChan)
 	wg.Wait()
+}
+
+func (p *Program) periodicJobs(dur time.Duration, f func()) func() {
+	ticker := time.NewTicker(dur)
+	return func() {
+		for {
+			select {
+			case <-ticker.C:
+				f()
+			}
+		}
+	}
 }

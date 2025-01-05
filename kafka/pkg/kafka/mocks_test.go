@@ -9,9 +9,11 @@ import (
 // Mock Node
 type MockNode struct {
 	NodeID       string
-	RunCalled    bool
-	HandleCalled bool
-	ReplyCalled  bool
+	NodeIdList   []string
+	RunCalled    int
+	SendCalled   int
+	HandleCalled int
+	ReplyCalled  int
 	LastMsg      Message
 	LastBody     any
 	ReturnError  error
@@ -22,7 +24,7 @@ func NewMockNode(id string) *MockNode {
 }
 
 func (m *MockNode) Run() error {
-	m.RunCalled = true
+	m.RunCalled++
 	return m.ReturnError
 }
 
@@ -30,12 +32,21 @@ func (m *MockNode) ID() string {
 	return m.NodeID
 }
 
+func (m *MockNode) NodeIDs() []string {
+	return m.NodeIdList
+}
+
+func (m *MockNode) Send(dest string, body any) error {
+	m.SendCalled++
+	return m.ReturnError
+}
+
 func (m *MockNode) Handle(rpcType string, handler maelstrom.HandlerFunc) {
-	m.HandleCalled = true
+	m.HandleCalled++
 }
 
 func (m *MockNode) Reply(msg Message, body any) error {
-	m.ReplyCalled = true
+	m.ReplyCalled++
 	m.LastMsg = msg
 	m.LastBody = body
 	return m.ReturnError

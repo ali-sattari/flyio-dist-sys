@@ -22,14 +22,13 @@ This way we can:
 * on poll read offset list key, filter offsets we need, read msg records
 
 okay, so far I think this is a good approach:
-* use snowflake id (implemented in unique-ids) for offsets
+* use g-counter via linkv CAS for offsets
 * store last committed offset per key in linkv
-* store offset_list in memory per node (or partitioned in seqkv)
-* gossip offset list between nodes
+* store offset_list in memory per node
 * store msgs in seqkv (as they are immutable, and wrote only once)
 
 then on RPCs:
-* when a send comes, we need to generate new offset, write msg, update offset_list
+* when a send comes, we need to generate new offset, write msg, update in_memory offset_list
 * when commit offset comes, CAS it in linkv
 * when list_committed_offset comes, read it by any node from linkv
 * when poll comes, check in_memory offset list, read msgs from seqkv based on filtered list, return
@@ -38,9 +37,23 @@ if that worked, expand it for efficiency:
 * gossip offset_list between nodes
 * prune in-memory offset_list after each commit_offset rpc (assuming poll only needs committed msgs to return?)
 
+### issues on 5b
+
+* poll skipped: I suspect due to local only offset list
+  maelstrom sends msg x to n0
+  then asks n1 about it, n1 doesn't have the offset locally so it doesn't return anything
+* we need to have some mechanism to share offsets across nodes
+  * kv version can be key:list[offset]
+    but then appending to the list is tricky, we either write and risk loosing offsets, or cas but risk going into cas loops
+  * another option is to gossip offsets between nodes
+    it has overhead and complexity of gossiping, but fits criteria of eventual consistency
+
 
 ### Todo:
 
-* why does snowflaker return negative ints?
-* probably need to switch from snowflaker for ID to g-counter, maelstrom overflows :/
-*
+* implement offset list gossip
+  * maybe move gossip buffer to channel
+    * it removes buff map and mutex, but then how to batch? on receiver end?
+  * add gossip to handleSend
+  * ???
+  * profit!

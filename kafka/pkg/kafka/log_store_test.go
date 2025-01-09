@@ -1,9 +1,10 @@
 package kafka
 
 import (
-	"reflect"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestKeyStore(t *testing.T) {
@@ -44,6 +45,33 @@ func TestKeyStore(t *testing.T) {
 			commit:          3,
 			expectCommitted: 3,
 		},
+		{
+			name:            "Read monotonous offsets only",
+			initial:         []int64{1, 2, 3, 4, 7, 8, 9},
+			writeOffsets:    []int64{},
+			readOffset:      2,
+			expectRead:      []int64{2, 3, 4},
+			commit:          3,
+			expectCommitted: 3,
+		},
+		{
+			name:            "Read monotonous offsets missing asked offset",
+			initial:         []int64{1, 2, 3, 4, 7, 8, 9},
+			writeOffsets:    []int64{},
+			readOffset:      6,
+			expectRead:      []int64{},
+			commit:          3,
+			expectCommitted: 3,
+		},
+		{
+			name:            "Read monotonous offsets having asked offset",
+			initial:         []int64{1, 2, 3, 4, 6, 7, 8, 9},
+			writeOffsets:    []int64{},
+			readOffset:      6,
+			expectRead:      []int64{6, 7, 8, 9},
+			commit:          3,
+			expectCommitted: 3,
+		},
 	}
 
 	for _, tt := range tests {
@@ -63,14 +91,10 @@ func TestKeyStore(t *testing.T) {
 			var got []int64
 			got = store.getOffsets(tt.readOffset)
 
-			if !reflect.DeepEqual(got, tt.expectRead) {
-				t.Errorf("expected %+v, got %+v", tt.expectRead, got)
-			}
+			assert.Equal(t, tt.expectRead, got, "offsets should match")
 
 			store.commitOffset(tt.commit)
-			if store.getCommittedOffset() != tt.expectCommitted {
-				t.Errorf("expected committed offset to be %d, got %d", tt.expectCommitted, store.getCommittedOffset())
-			}
+			assert.Equal(t, tt.expectCommitted, store.getCommittedOffset(), "committed offset should match")
 		})
 	}
 }

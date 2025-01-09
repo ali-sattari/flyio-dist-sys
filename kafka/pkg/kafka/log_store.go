@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"slices"
 	"sync"
 )
 
@@ -30,6 +31,7 @@ func (k *keyStore) store(offset int64) {
 	defer k.mtx.Unlock()
 
 	k.offsets = append(k.offsets, offset)
+	slices.Sort(k.offsets)
 }
 
 func (k *keyStore) getOffsets(offset int64) []int64 {
@@ -37,9 +39,15 @@ func (k *keyStore) getOffsets(offset int64) []int64 {
 	defer k.mtx.RUnlock()
 
 	res := []int64{}
+	if offset > 0 && contains(k.offsets, offset) == false {
+		return res
+	}
+
+	curr := offset
 	for _, l := range k.offsets {
-		if l >= offset {
+		if l >= offset && l-curr <= 1 {
 			res = append(res, l)
+			curr = l
 		}
 	}
 	return res

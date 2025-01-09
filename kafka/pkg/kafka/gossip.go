@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"log"
 	"time"
 
 	uuid "github.com/google/uuid"
@@ -87,6 +88,8 @@ func (p *Program) receiveGossip(body workload, msg maelstrom.Message) receiveGos
 			p.gossip(msg.Src, key, o)
 		}
 	}
+	ks := p.getKeyStore(key)
+	log.Printf("receiveGossip: local keystore for %s looks like %+v", key, ks)
 
 	return resp
 }

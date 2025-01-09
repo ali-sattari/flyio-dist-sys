@@ -12,6 +12,7 @@ import (
 func TestGetNextOffset(t *testing.T) {
 	tests := []struct {
 		name           string
+		key            string
 		initialOffset  int
 		expectedOffset int64
 		kvReadErr      error
@@ -20,6 +21,7 @@ func TestGetNextOffset(t *testing.T) {
 	}{
 		{
 			name:           "initial offset 0",
+			key:            "k1",
 			initialOffset:  0,
 			expectedOffset: 1,
 			kvCasErr:       nil,
@@ -27,6 +29,7 @@ func TestGetNextOffset(t *testing.T) {
 		},
 		{
 			name:           "initial offset 5",
+			key:            "k1",
 			initialOffset:  5,
 			expectedOffset: 6,
 			kvCasErr:       nil,
@@ -34,6 +37,7 @@ func TestGetNextOffset(t *testing.T) {
 		},
 		{
 			name:           "non-precondition failure, error returned",
+			key:            "k1",
 			initialOffset:  0,
 			expectedOffset: 1,
 			kvCasErr:       maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "KV error"),
@@ -41,6 +45,7 @@ func TestGetNextOffset(t *testing.T) {
 		},
 		{
 			name:           "cas failure, should retry",
+			key:            "k1",
 			initialOffset:  5,
 			expectedOffset: 6,
 			kvCasErr:       maelstrom.NewRPCError(maelstrom.PreconditionFailed, "Cas error"),
@@ -59,7 +64,7 @@ func TestGetNextOffset(t *testing.T) {
 			mockNode := NewMockNode("n1")
 			p := New(mockNode, mockLinKV, mockSeqKV)
 
-			offset := p.getNextOffset()
+			offset := p.getNextOffset(tt.key)
 			assert.Equal(t, tt.expectedOffset, offset)
 			assert.Equal(t, tt.casCalledTimes, mockLinKV.CasCalled)
 		})
@@ -337,7 +342,7 @@ func TestHandlePoll(t *testing.T) {
 			},
 			expectedMsgs: message_list{
 				"k1": []offset_msg_pair{{1, 100}},
-				"k2": []offset_msg_pair{{2, 200}},
+				"k2": []offset_msg_pair{}, // no poll returned because of gap in offsets
 			},
 		},
 		{

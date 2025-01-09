@@ -64,7 +64,6 @@ type listCommittedOffsetsResponse struct {
 var wg sync.WaitGroup
 
 const (
-	LAST_OFFSET_KEY      = "global_offset_counter"
 	LAST_OFFSET_START    = 0
 	MAX_POLL_LIST_LENGTH = 10
 )
@@ -141,7 +140,7 @@ func (p *Program) handleInit() baseResponse {
 }
 
 func (p *Program) handleSend(body workload) sendResponse {
-	o := p.getNextOffset()
+	o := p.getNextOffset(body.Key)
 
 	p.storageChan <- map[string]msgLog{
 		body.Key: {offset: o, msg: body.Msg},
@@ -164,11 +163,12 @@ func (p *Program) storeMsg(key string, entry msgLog) {
 	}
 }
 
-func (p *Program) getNextOffset() int64 {
+func (p *Program) getNextOffset(key string) int64 {
+	offset_key := formatLastOffsetKey(key)
 	for {
-		current, _ := p.linKv.ReadInt(context.Background(), LAST_OFFSET_KEY)
+		current, _ := p.linKv.ReadInt(context.Background(), offset_key)
 		next := current + 1
-		err := p.linKv.CompareAndSwap(context.Background(), LAST_OFFSET_KEY, current, next, true)
+		err := p.linKv.CompareAndSwap(context.Background(), offset_key, current, next, true)
 		if err != nil {
 			switch e := err.(type) {
 			case *maelstrom.RPCError:
@@ -177,7 +177,7 @@ func (p *Program) getNextOffset() int64 {
 					continue
 				}
 			default:
-				log.Printf("getNextOffset: error %d -> %d: %s", current, next, err)
+				log.Printf("getNextOffset: for %s error %d -> %d: %s", key, current, next, err)
 			}
 		}
 		return int64(next)

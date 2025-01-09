@@ -37,23 +37,9 @@ if that worked, expand it for efficiency:
 * gossip offset_list between nodes
 * prune in-memory offset_list after each commit_offset rpc (assuming poll only needs committed msgs to return?)
 
-### issues on 5b
+### Gotchas
 
-* poll skipped: I suspect due to local only offset list
-  maelstrom sends msg x to n0
-  then asks n1 about it, n1 doesn't have the offset locally so it doesn't return anything
-* we need to have some mechanism to share offsets across nodes
-  * kv version can be key:list[offset]
-    but then appending to the list is tricky, we either write and risk loosing offsets, or cas but risk going into cas loops
-  * another option is to gossip offsets between nodes
-    it has overhead and complexity of gossiping, but fits criteria of eventual consistency
-
-
-### Todo:
-
-* implement offset list gossip
-  * maybe move gossip buffer to channel
-    * it removes buff map and mutex, but then how to batch? on receiver end?
-  * add gossip to handleSend
-  * ???
-  * profit!
+* poll skipped: it was because of returning non-monotonic offsets
+  to fix I made these changes:
+    * made offset per key (instead of global), better for congestion as well
+    * changed poll (well keyStore read) to only return continuous offsets starting from asked offset

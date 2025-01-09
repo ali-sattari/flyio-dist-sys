@@ -75,21 +75,21 @@ func TestStoreMsg(t *testing.T) {
 	tests := []struct {
 		name             string
 		key              string
-		entry            msgLog
+		entry            MsgLog
 		initialStorage   map[string]*keyStore
 		expectedMessages map[int64]int64
 	}{
 		{
 			name:             "new key",
 			key:              "k1",
-			entry:            msgLog{offset: 1, msg: 100},
+			entry:            MsgLog{Offset: 1, Msg: 100},
 			initialStorage:   map[string]*keyStore{},
 			expectedMessages: map[int64]int64{1: 100},
 		},
 		{
 			name:  "existing key",
 			key:   "k1",
-			entry: msgLog{offset: 2, msg: 200},
+			entry: MsgLog{Offset: 2, Msg: 200},
 			initialStorage: map[string]*keyStore{
 				"k1": {
 					key:       "k1",
@@ -226,7 +226,7 @@ func TestHandleSend(t *testing.T) {
 				node:        mockNode,
 				linKv:       mockLinKV,
 				seqKv:       mockSeqKV,
-				storageChan: make(chan map[string]msgLog, 5),
+				storageChan: make(chan map[string]MsgLog, 5),
 			}
 			resp := p.handleSend(tt.body)
 
@@ -237,8 +237,8 @@ func TestHandleSend(t *testing.T) {
 			select {
 			case storedMsgs := <-p.storageChan:
 				assert.Contains(t, storedMsgs, tt.body.Key)
-				assert.Equal(t, tt.expectedOffset, storedMsgs[tt.body.Key].offset)
-				assert.Equal(t, tt.expectedMsg, storedMsgs[tt.body.Key].msg)
+				assert.Equal(t, tt.expectedOffset, storedMsgs[tt.body.Key].Offset)
+				assert.Equal(t, tt.expectedMsg, storedMsgs[tt.body.Key].Msg)
 			default:
 				t.Fatal("Message not sent to storage channel")
 			}

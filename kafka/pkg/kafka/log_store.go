@@ -6,9 +6,9 @@ import (
 	"sync"
 )
 
-type msgLog struct {
-	offset int64
-	msg    int64
+type MsgLog struct {
+	Offset int64 `json:"offset"`
+	Msg    int64 `json:"msg"`
 }
 
 type keyStore struct {
@@ -29,19 +29,19 @@ func NewKeyStore(key string) *keyStore {
 	}
 }
 
-func (k *keyStore) store(offset, msg int64) {
+func (k *keyStore) store(msg MsgLog) {
 	k.mtx.Lock()
 	defer k.mtx.Unlock()
 
-	k.messages[offset] = msg
+	k.messages[msg.Offset] = msg.Msg
 	k.offsets = slices.Sorted(maps.Keys(k.messages))
 }
 
-func (k *keyStore) getMessages(offset int64) []msgLog {
+func (k *keyStore) getMessages(offset int64) []MsgLog {
 	k.mtx.RLock()
 	defer k.mtx.RUnlock()
 
-	res := []msgLog{}
+	res := []MsgLog{}
 	if offset > 0 && contains(k.offsets, offset) == false {
 		return res
 	}
@@ -49,7 +49,7 @@ func (k *keyStore) getMessages(offset int64) []msgLog {
 	curr := offset
 	for _, l := range k.offsets {
 		if l >= offset && l-curr <= 1 {
-			res = append(res, msgLog{offset: l, msg: k.messages[l]})
+			res = append(res, MsgLog{Offset: l, Msg: k.messages[l]})
 			curr = l
 		}
 	}

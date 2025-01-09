@@ -14,7 +14,7 @@ type Program struct {
 	node        NodeInterface
 	storage     map[string]*keyStore
 	storageMtx  *sync.RWMutex
-	storageChan chan map[string]msgLog
+	storageChan chan map[string]MsgLog
 
 	linKv KVInterface
 	seqKv KVInterface
@@ -37,14 +37,14 @@ type workload struct {
 	Offset         int64            `json:"offset,omitempty"`
 	Offsets        map[string]int64 `json:"offsets,omitempty"`
 	GossipId       string           `json:"gossip_id,omitempty"`
-	GossipMessages []msgLog         `json:"gossip_messages,omitempty"`
+	GossipMessages []MsgLog         `json:"gossip_messages,omitempty"`
 }
 
-type offset_msg_pair [2]int64
+type offset_msg_pair [2]int64 //offset,msg
 type key_offset_pair map[string]int64
 type message_list map[string][]offset_msg_pair
-type offset_list map[string][]int64
-type msg_log_list map[string][]msgLog
+type offset_list map[string][]int64   //key:[]int64
+type msg_log_list map[string][]MsgLog //key:[]msglog
 
 type baseResponse struct {
 	Type string `json:"type"`
@@ -76,7 +76,7 @@ func New(n NodeInterface, linKv, seqKv KVInterface) Program {
 		seqKv:       seqKv,
 		storage:     map[string]*keyStore{},
 		storageMtx:  &sync.RWMutex{},
-		storageChan: make(chan map[string]msgLog, 5),
+		storageChan: make(chan map[string]MsgLog, 5),
 		topo:        []string{},
 		gossiped:    map[string][]gossipLog{},
 		ackMtx:      &sync.Mutex{},
@@ -111,7 +111,7 @@ func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 			resp = p.handleInit()
 		case "send":
 			resp = p.handleSend(body)
-			p.gossip(msg.Src, body.Key, msgLog{offset: resp.(sendResponse).Offset, msg: body.Msg})
+			p.gossip(msg.Src, body.Key, MsgLog{Offset: resp.(sendResponse).Offset, Msg: body.Msg})
 		case "poll":
 			resp = p.handlePoll(body)
 		case "commit_offsets":
@@ -143,8 +143,8 @@ func (p *Program) handleInit() baseResponse {
 func (p *Program) handleSend(body workload) sendResponse {
 	o := p.getNextOffset(body.Key)
 
-	p.storageChan <- map[string]msgLog{
-		body.Key: {offset: o, msg: body.Msg},
+	p.storageChan <- map[string]MsgLog{
+		body.Key: {Offset: o, Msg: body.Msg},
 	}
 
 	resp := sendResponse{
@@ -154,9 +154,9 @@ func (p *Program) handleSend(body workload) sendResponse {
 	return resp
 }
 
-func (p *Program) storeMsg(key string, entry msgLog) {
+func (p *Program) storeMsg(key string, entry MsgLog) {
 	ks := p.getKeyStore(key)
-	ks.store(entry.offset, entry.msg)
+	ks.store(entry)
 }
 
 func (p *Program) getNextOffset(key string) int64 {
@@ -202,7 +202,7 @@ func (p *Program) handlePoll(body workload) pollResponse {
 			// 		}
 			// 	}
 			// }
-			logs[k] = append(logs[k], [2]int64{m.offset, m.msg})
+			logs[k] = append(logs[k], [2]int64{m.Offset, m.Msg})
 			count++
 		}
 

@@ -14,9 +14,9 @@ func TestKeyStore(t *testing.T) {
 		name            string
 		initialMessages map[int64]int64
 		committed       int64
-		writeMessages   []msgLog // Messages to write during the test
+		writeMessages   []MsgLog // Messages to write during the test
 		readOffset      int64    // Offset to read from
-		expectRead      []msgLog // Expected result from `getMessages`
+		expectRead      []MsgLog // Expected result from `getMessages`
 		commit          int64    // Offset to commit during the test
 		expectCommitted int64    // Expected committed offset after commit
 	}{
@@ -25,7 +25,7 @@ func TestKeyStore(t *testing.T) {
 			initialMessages: nil,
 			writeMessages:   nil,
 			readOffset:      1,
-			expectRead:      []msgLog{},
+			expectRead:      []MsgLog{},
 			commit:          0,
 			expectCommitted: 0,
 		},
@@ -34,9 +34,9 @@ func TestKeyStore(t *testing.T) {
 			initialMessages: map[int64]int64{1: 10, 2: 20, 3: 30},
 			writeMessages:   nil,
 			readOffset:      2,
-			expectRead: []msgLog{
-				{offset: 2, msg: 20},
-				{offset: 3, msg: 30},
+			expectRead: []MsgLog{
+				{Offset: 2, Msg: 20},
+				{Offset: 3, Msg: 30},
 			},
 			commit:          2,
 			expectCommitted: 2,
@@ -44,13 +44,13 @@ func TestKeyStore(t *testing.T) {
 		{
 			name:            "Write and read from offset 3",
 			initialMessages: map[int64]int64{1: 10},
-			writeMessages: []msgLog{
-				{offset: 2, msg: 20},
-				{offset: 3, msg: 30},
+			writeMessages: []MsgLog{
+				{Offset: 2, Msg: 20},
+				{Offset: 3, Msg: 30},
 			},
 			readOffset: 3,
-			expectRead: []msgLog{
-				{offset: 3, msg: 30},
+			expectRead: []MsgLog{
+				{Offset: 3, Msg: 30},
 			},
 			commit:          3,
 			expectCommitted: 3,
@@ -58,12 +58,12 @@ func TestKeyStore(t *testing.T) {
 		{
 			name:            "Read monotonous offsets only",
 			initialMessages: map[int64]int64{1: 10, 2: 20, 3: 30, 4: 40, 7: 70, 8: 80, 9: 90},
-			writeMessages:   []msgLog{},
+			writeMessages:   []MsgLog{},
 			readOffset:      2,
-			expectRead: []msgLog{
-				{offset: 2, msg: 20},
-				{offset: 3, msg: 30},
-				{offset: 4, msg: 40},
+			expectRead: []MsgLog{
+				{Offset: 2, Msg: 20},
+				{Offset: 3, Msg: 30},
+				{Offset: 4, Msg: 40},
 			},
 			commit:          3,
 			expectCommitted: 3,
@@ -71,22 +71,22 @@ func TestKeyStore(t *testing.T) {
 		{
 			name:            "Read monotonous offsets missing asked offset",
 			initialMessages: map[int64]int64{1: 10, 2: 20, 3: 30, 4: 40, 7: 70, 8: 80, 9: 90},
-			writeMessages:   []msgLog{},
+			writeMessages:   []MsgLog{},
 			readOffset:      6,
-			expectRead:      []msgLog{},
+			expectRead:      []MsgLog{},
 			commit:          3,
 			expectCommitted: 3,
 		},
 		{
 			name:            "Read monotonous offsets having asked offset",
 			initialMessages: map[int64]int64{1: 10, 2: 20, 3: 30, 4: 40, 6: 60, 7: 70, 8: 80, 9: 90},
-			writeMessages:   []msgLog{},
+			writeMessages:   []MsgLog{},
 			readOffset:      6,
-			expectRead: []msgLog{
-				{offset: 6, msg: 60},
-				{offset: 7, msg: 70},
-				{offset: 8, msg: 80},
-				{offset: 9, msg: 90},
+			expectRead: []MsgLog{
+				{Offset: 6, Msg: 60},
+				{Offset: 7, Msg: 70},
+				{Offset: 8, Msg: 80},
+				{Offset: 9, Msg: 90},
 			},
 			commit:          3,
 			expectCommitted: 3,
@@ -104,8 +104,8 @@ func TestKeyStore(t *testing.T) {
 				mtx:       &sync.RWMutex{},
 			}
 
-			for _, o := range tt.writeMessages {
-				store.store(o.offset, o.msg)
+			for _, m := range tt.writeMessages {
+				store.store(m)
 			}
 			// t.Logf("logs %+v", store)
 

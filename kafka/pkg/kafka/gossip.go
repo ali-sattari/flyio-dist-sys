@@ -11,7 +11,7 @@ type gossipLog struct {
 	at       int64
 	gossipId string
 	key      string
-	messages []msgLog
+	messages []MsgLog
 }
 
 type receiveGossipResponse struct {
@@ -23,28 +23,28 @@ type sendGossipBody struct {
 	Type           string   `json:"type"`
 	GossipId       string   `json:"gossip_id"`
 	Key            string   `json:"key"`
-	GossipMessages []msgLog `json:"gossip_messages"`
+	GossipMessages []MsgLog `json:"gossip_messages"`
 }
 
 const bufferAge time.Duration = time.Millisecond * 200
 
-func (p *Program) gossip(src, key string, msg msgLog) {
+func (p *Program) gossip(src, key string, msg MsgLog) {
 	targets := p.topo
 	for _, t := range targets {
 		if t == src || t == p.node.ID() { // breaking gossip loop
 			continue
 		}
-		// log.Printf("gossip: from %s to %s for %s: %+v", src, t, key, offset)
+		// log.Printf("gossip: from %s to %s for %s: %+v", src, t, key, msg)
 		p.bufMtx.Lock()
 		if _, ok := p.buffer[t]; !ok {
-			p.buffer[t] = map[string][]msgLog{}
+			p.buffer[t] = map[string][]MsgLog{}
 		}
 		p.buffer[t][key] = append(p.buffer[t][key], msg)
 		p.bufMtx.Unlock()
 	}
 }
 
-func (p *Program) addGossipLog(node, id, key string, messages []msgLog) {
+func (p *Program) addGossipLog(node, id, key string, messages []MsgLog) {
 	p.ackMtx.Lock()
 	defer p.ackMtx.Unlock()
 
@@ -114,7 +114,7 @@ func (p *Program) flushGossipBuffer() {
 				p.addGossipLog(t, gid, key, msgList)
 				delete(p.buffer[t], key)
 			}
-			p.buffer[t] = make(map[string][]msgLog)
+			p.buffer[t] = make(map[string][]MsgLog)
 		}
 		p.lastFlush = time.Now()
 	}
@@ -142,13 +142,13 @@ func (p *Program) resendUnackedGossips() {
 	p.ackMtx.Unlock()
 }
 
-func (p *Program) processMsg(key string, msg msgLog) bool {
+func (p *Program) processMsg(key string, msg MsgLog) bool {
 	ks := p.getKeyStore(key)
 
-	if contains(ks.offsets, msg.offset) {
+	if contains(ks.offsets, msg.Offset) {
 		return false
 	}
-	ks.store(msg.offset, msg.msg)
+	ks.store(msg)
 	// log.Printf("processMsg: storing %d for %s through gossip %+v", offset, key, ks)
 
 	return true

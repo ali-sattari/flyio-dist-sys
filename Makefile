@@ -60,6 +60,8 @@ ifeq ($(SUB),5a)
 	$(BASE_CMD) --node-count 1 --concurrency 2n --time-limit 20 --rate 1000;
 else ifeq ($(SUB),5b)
 	$(BASE_CMD) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000;
+else ifeq ($(SUB),5c)
+	$(BASE_CMD) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000;
 else
 	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
 endif

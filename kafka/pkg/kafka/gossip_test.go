@@ -1,6 +1,8 @@
 package kafka
 
 import (
+	"maps"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -16,41 +18,33 @@ func TestProcessMsg(t *testing.T) {
 	tests := []struct {
 		name             string
 		key              string
-		offset           int64
-		initialOffsets   []int64
-		expectedOffsets  []int64
+		message          msgLog
+		initialMessages  map[int64]int64
+		expectedMessages map[int64]int64
 		expectedNewEntry bool // Whether a new offset should be added
 	}{
 		{
-			name:             "New offset",
+			name:             "New message",
 			key:              "k1",
-			offset:           1,
-			initialOffsets:   []int64{},
-			expectedOffsets:  []int64{1},
+			message:          msgLog{1, 10},
+			initialMessages:  map[int64]int64{},
+			expectedMessages: map[int64]int64{1: 10},
 			expectedNewEntry: true,
 		},
 		{
-			name:             "Existing offset",
+			name:             "Existing message",
 			key:              "k1",
-			offset:           1,
-			initialOffsets:   []int64{1, 2, 3},
-			expectedOffsets:  []int64{1, 2, 3},
+			message:          msgLog{1, 10},
+			initialMessages:  map[int64]int64{1: 10, 2: 20, 3: 30},
+			expectedMessages: map[int64]int64{1: 10, 2: 20, 3: 30},
 			expectedNewEntry: false,
 		},
 		{
-			name:             "New offset in existing keyStore",
+			name:             "New message in existing keyStore",
 			key:              "k1",
-			offset:           4,
-			initialOffsets:   []int64{1, 2, 3},
-			expectedOffsets:  []int64{1, 2, 3, 4},
-			expectedNewEntry: true,
-		},
-		{
-			name:             "Empty initial offsets",
-			key:              "k1",
-			offset:           1,
-			initialOffsets:   []int64{},
-			expectedOffsets:  []int64{1},
+			message:          msgLog{4, 40},
+			initialMessages:  map[int64]int64{1: 10, 2: 20, 3: 30},
+			expectedMessages: map[int64]int64{1: 10, 2: 20, 3: 30, 4: 40},
 			expectedNewEntry: true,
 		},
 	}
@@ -62,16 +56,22 @@ func TestProcessMsg(t *testing.T) {
 				storageMtx: &sync.RWMutex{},
 			}
 
-			ks := &keyStore{key: tt.key, committed: 0, mtx: &sync.RWMutex{}, offsets: tt.initialOffsets}
+			ks := &keyStore{
+				key:       tt.key,
+				committed: 0,
+				mtx:       &sync.RWMutex{},
+				offsets:   slices.Sorted(maps.Keys(tt.initialMessages)),
+				messages:  tt.initialMessages,
+			}
 			p.storage[tt.key] = ks
 
 			// Call the processMsg function
-			newEntry := p.processMsg(tt.key, tt.offset)
+			newEntry := p.processMsg(tt.key, tt.message)
 
 			// Assertions
 			ks.mtx.RLock()
 			defer ks.mtx.RUnlock()
-			assert.Equal(t, tt.expectedOffsets, ks.offsets)
+			assert.Equal(t, tt.expectedMessages, ks.messages)
 			assert.Equal(t, tt.expectedNewEntry, newEntry)
 
 		})
@@ -85,9 +85,9 @@ func TestGossip(t *testing.T) {
 		src            string
 		key            string
 		topology       []string
-		offset         int64
-		initialBuffer  map[string]offset_list
-		expectedBuffer map[string]offset_list
+		message        msgLog
+		initialBuffer  map[string]msg_log_list
+		expectedBuffer map[string]msg_log_list
 	}{
 		{
 			name:          "Gossip to single node",
@@ -95,11 +95,11 @@ func TestGossip(t *testing.T) {
 			src:           "n1",
 			topology:      []string{"n3"},
 			key:           "k1",
-			offset:        42,
-			initialBuffer: map[string]offset_list{},
-			expectedBuffer: map[string]offset_list{
+			message:       msgLog{offset: 42, msg: 1},
+			initialBuffer: map[string]msg_log_list{},
+			expectedBuffer: map[string]msg_log_list{
 				"n3": {
-					"k1": {42},
+					"k1": {{42, 1}},
 				},
 			},
 		},
@@ -109,11 +109,15 @@ func TestGossip(t *testing.T) {
 			src:           "n1",
 			key:           "k1",
 			topology:      []string{"n3", "n4"},
-			offset:        42,
-			initialBuffer: map[string]offset_list{},
-			expectedBuffer: map[string]offset_list{
-				"n3": {"k1": {42}},
-				"n4": {"k1": {42}},
+			message:       msgLog{offset: 42, msg: 1},
+			initialBuffer: map[string]msg_log_list{},
+			expectedBuffer: map[string]msg_log_list{
+				"n3": {
+					"k1": {{42, 1}},
+				},
+				"n4": {
+					"k1": {{42, 1}},
+				},
 			},
 		},
 		{
@@ -122,24 +126,34 @@ func TestGossip(t *testing.T) {
 			src:           "n1",
 			key:           "k1",
 			topology:      []string{"n1", "n3"},
-			offset:        42,
-			initialBuffer: map[string]offset_list{},
-			expectedBuffer: map[string]offset_list{
-				"n3": {"k1": {42}},
+			message:       msgLog{offset: 42, msg: 1},
+			initialBuffer: map[string]msg_log_list{},
+			expectedBuffer: map[string]msg_log_list{
+				"n3": {
+					"k1": {{42, 1}},
+				},
 			},
 		},
 		{
-			name:     "Append to existing offsets",
+			name:     "Append to existing messages",
 			node:     "n2",
 			src:      "n1",
 			topology: []string{"n3"},
 			key:      "k1",
-			offset:   42,
-			initialBuffer: map[string]offset_list{
-				"n3": {"k1": {1, 2, 3}},
+			message:  msgLog{offset: 42, msg: 420},
+			initialBuffer: map[string]msg_log_list{
+				"n3": {
+					"k1": {
+						{1, 10}, {2, 20}, {3, 20},
+					},
+				},
 			},
-			expectedBuffer: map[string]offset_list{
-				"n3": {"k1": {1, 2, 3, 42}},
+			expectedBuffer: map[string]msg_log_list{
+				"n3": {
+					"k1": {
+						{1, 10}, {2, 20}, {3, 20}, {42, 420},
+					},
+				},
 			},
 		},
 	}
@@ -149,7 +163,7 @@ func TestGossip(t *testing.T) {
 			p := Program{
 				node:   NewMockNode(tt.node),
 				topo:   tt.topology,
-				buffer: map[string]offset_list{},
+				buffer: map[string]msg_log_list{},
 				bufMtx: &sync.Mutex{},
 			}
 
@@ -157,7 +171,7 @@ func TestGossip(t *testing.T) {
 				p.buffer[k] = tt.initialBuffer[k]
 			}
 
-			p.gossip(tt.src, tt.key, tt.offset)
+			p.gossip(tt.src, tt.key, tt.message)
 
 			for node, expectedOffset := range tt.expectedBuffer {
 				actualOffset := p.buffer[node]
@@ -172,21 +186,21 @@ func TestReceiveGossip(t *testing.T) {
 		name              string
 		node              string
 		key               string
-		gossipOffsets     []int64
-		initialOffsets    []int64
+		gossipMessages    []msgLog
+		initialMessages   map[int64]int64
 		mockNode          *MockNode
 		expectedKeystores map[string]*keyStore
 		expectedRes       receiveGossipResponse
 	}{
 		{
-			name:           "New offset",
-			node:           "n1",
-			key:            "key1",
-			gossipOffsets:  []int64{100},
-			initialOffsets: []int64{},
-			mockNode:       NewMockNode("n1"),
+			name:            "New offset",
+			node:            "n1",
+			key:             "key1",
+			gossipMessages:  []msgLog{{1, 100}},
+			initialMessages: map[int64]int64{},
+			mockNode:        NewMockNode("n1"),
 			expectedKeystores: map[string]*keyStore{
-				"key1": {offsets: []int64{100}},
+				"key1": {messages: map[int64]int64{1: 100}},
 			},
 			expectedRes: receiveGossipResponse{
 				Type:     "gossip_ok",
@@ -194,14 +208,14 @@ func TestReceiveGossip(t *testing.T) {
 			},
 		},
 		{
-			name:           "Existing offset",
-			node:           "n1",
-			key:            "key1",
-			gossipOffsets:  []int64{100},
-			initialOffsets: []int64{100},
-			mockNode:       NewMockNode("n1"),
+			name:            "Existing offset",
+			node:            "n1",
+			key:             "key1",
+			gossipMessages:  []msgLog{{1, 100}},
+			initialMessages: map[int64]int64{1: 100},
+			mockNode:        NewMockNode("n1"),
 			expectedKeystores: map[string]*keyStore{
-				"key1": {offsets: []int64{100}},
+				"key1": {messages: map[int64]int64{1: 100}},
 			},
 			expectedRes: receiveGossipResponse{
 				Type:     "gossip_ok",
@@ -209,14 +223,14 @@ func TestReceiveGossip(t *testing.T) {
 			},
 		},
 		{
-			name:           "Multiple offsets, some new",
-			node:           "n1",
-			key:            "key1",
-			gossipOffsets:  []int64{100, 102, 105},
-			initialOffsets: []int64{100, 101},
-			mockNode:       NewMockNode("n1"),
+			name:            "Multiple offsets, some new",
+			node:            "n1",
+			key:             "key1",
+			gossipMessages:  []msgLog{{1, 101}, {3, 103}, {5, 105}},
+			initialMessages: map[int64]int64{1: 101, 2: 102},
+			mockNode:        NewMockNode("n1"),
 			expectedKeystores: map[string]*keyStore{
-				"key1": {offsets: []int64{100, 101, 102, 105}},
+				"key1": {messages: map[int64]int64{1: 101, 2: 102, 3: 103, 5: 105}},
 			},
 			expectedRes: receiveGossipResponse{
 				Type:     "gossip_ok",
@@ -231,18 +245,22 @@ func TestReceiveGossip(t *testing.T) {
 				node:       tt.mockNode,
 				topo:       []string{"n2", "n3"},
 				bufMtx:     &sync.Mutex{},
-				buffer:     map[string]offset_list{},
+				buffer:     map[string]msg_log_list{},
 				storageMtx: &sync.RWMutex{},
 				storage: map[string]*keyStore{
-					"key1": {offsets: tt.initialOffsets, mtx: &sync.RWMutex{}},
+					"key1": {
+						offsets:  slices.Sorted(maps.Keys(tt.initialMessages)),
+						messages: tt.initialMessages,
+						mtx:      &sync.RWMutex{},
+					},
 				},
 			}
 
 			body := workload{
-				Type:          "gossip",
-				GossipId:      "gossip_id_1",
-				Key:           tt.key,
-				GossipOffsets: tt.gossipOffsets,
+				Type:           "gossip",
+				GossipId:       "gossip_id_1",
+				Key:            tt.key,
+				GossipMessages: tt.gossipMessages,
 			}
 
 			msg := maelstrom.Message{
@@ -255,7 +273,7 @@ func TestReceiveGossip(t *testing.T) {
 
 			// Assert the keystores
 			for k, v := range tt.expectedKeystores {
-				assert.ElementsMatch(t, v.offsets, p.storage[k].offsets)
+				assert.Equal(t, v.messages, p.storage[k].messages)
 			}
 		})
 	}
@@ -267,7 +285,7 @@ func TestAddGossipLog(t *testing.T) {
 		node         string
 		key          string
 		id           string
-		offsets      []int64
+		messages     []msgLog
 		initialLogs  map[string][]gossipLog
 		expectedLogs map[string][]gossipLog
 	}{
@@ -276,65 +294,65 @@ func TestAddGossipLog(t *testing.T) {
 			node:        "n1",
 			key:         "k1",
 			id:          "id111",
-			offsets:     []int64{1, 2, 3},
+			messages:    []msgLog{{1, 100}, {2, 200}, {3, 300}},
 			initialLogs: map[string][]gossipLog{},
 			expectedLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "id111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "id111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 			},
 		},
 		{
-			name:    "Append new log",
-			node:    "n1",
-			key:     "k1",
-			id:      "id222",
-			offsets: []int64{4, 5, 6},
+			name:     "Append new log",
+			node:     "n1",
+			key:      "k1",
+			id:       "id222",
+			messages: []msgLog{{4, 400}, {5, 500}, {6, 600}},
 			initialLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "id111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "id111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 			},
 			expectedLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "id111", key: "k1", offsets: []int64{1, 2, 3}},
-					{gossipId: "id222", key: "k1", offsets: []int64{4, 5, 6}},
+					{gossipId: "id111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
+					{gossipId: "id222", key: "k1", messages: []msgLog{{4, 400}, {5, 500}, {6, 600}}},
 				},
 			},
 		},
 		{
-			name:    "Append duplicate offset",
-			node:    "n1",
-			key:     "k1",
-			id:      "id222",
-			offsets: []int64{1, 2, 3},
+			name:     "Append duplicate offset",
+			node:     "n1",
+			key:      "k1",
+			id:       "id222",
+			messages: []msgLog{{1, 100}, {2, 200}, {3, 300}},
 			initialLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "id111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "id111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 			},
 			expectedLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "id111", key: "k1", offsets: []int64{1, 2, 3}},
-					{gossipId: "id222", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "id111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
+					{gossipId: "id222", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 			},
 		},
 		{
-			name:    "Append with different key",
-			node:    "n1",
-			key:     "k2",
-			id:      "id222",
-			offsets: []int64{11, 12, 13},
+			name:     "Append with different key",
+			node:     "n1",
+			key:      "k2",
+			id:       "id222",
+			messages: []msgLog{{11, 1100}, {12, 1200}, {13, 1300}},
 			initialLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "id111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "id111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 			},
 			expectedLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "id111", key: "k1", offsets: []int64{1, 2, 3}},
-					{gossipId: "id222", key: "k2", offsets: []int64{11, 12, 13}},
+					{gossipId: "id111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
+					{gossipId: "id222", key: "k2", messages: []msgLog{{11, 1100}, {12, 1200}, {13, 1300}}},
 				},
 			},
 		},
@@ -347,14 +365,14 @@ func TestAddGossipLog(t *testing.T) {
 				ackMtx:   &sync.Mutex{},
 			}
 
-			p.addGossipLog(tt.node, tt.id, tt.key, tt.offsets)
+			p.addGossipLog(tt.node, tt.id, tt.key, tt.messages)
 
 			assert.Empty(
 				t,
 				cmp.Diff(
 					tt.expectedLogs,
 					p.gossiped,
-					cmp.AllowUnexported(gossipLog{}),
+					cmp.AllowUnexported(gossipLog{}, msgLog{}),
 					cmpopts.IgnoreFields(gossipLog{}, "at"),
 				),
 				"Diff between expected and p.gossiped actual",
@@ -377,7 +395,7 @@ func TestAckGossip(t *testing.T) {
 			id:   "gossip111",
 			initialLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "gossip111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "gossip111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 			},
 			expectedLogs: map[string][]gossipLog{
@@ -390,12 +408,12 @@ func TestAckGossip(t *testing.T) {
 			id:   "gossip222",
 			initialLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "gossip111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "gossip111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 			},
 			expectedLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "gossip111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "gossip111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 			},
 		},
@@ -405,15 +423,15 @@ func TestAckGossip(t *testing.T) {
 			id:   "gossip222",
 			initialLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "gossip111", key: "k1", offsets: []int64{1, 2, 3}},
-					{gossipId: "gossip222", key: "k2", offsets: []int64{42, 101, 60}},
-					{gossipId: "gossip333", key: "k5", offsets: []int64{4, 5, 6}},
+					{gossipId: "gossip111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
+					{gossipId: "gossip222", key: "k2", messages: []msgLog{{4, 44}, {5, 55}, {6, 66}}},
+					{gossipId: "gossip333", key: "k5", messages: []msgLog{{40, 400}, {50, 500}, {60, 600}}},
 				},
 			},
 			expectedLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "gossip111", key: "k1", offsets: []int64{1, 2, 3}},
-					{gossipId: "gossip333", key: "k5", offsets: []int64{4, 5, 6}},
+					{gossipId: "gossip111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
+					{gossipId: "gossip333", key: "k5", messages: []msgLog{{40, 400}, {50, 500}, {60, 600}}},
 				},
 			},
 		},
@@ -423,19 +441,19 @@ func TestAckGossip(t *testing.T) {
 			id:   "gossip222",
 			initialLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "gossip111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "gossip111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 				"n2": {
-					{gossipId: "gossip222", key: "k2", offsets: []int64{42, 101, 60}},
-					{gossipId: "gossip333", key: "k5", offsets: []int64{4, 5, 6}},
+					{gossipId: "gossip222", key: "k2", messages: []msgLog{{4, 44}, {5, 55}, {6, 66}}},
+					{gossipId: "gossip333", key: "k5", messages: []msgLog{{40, 400}, {50, 500}, {60, 600}}},
 				},
 			},
 			expectedLogs: map[string][]gossipLog{
 				"n1": {
-					{gossipId: "gossip111", key: "k1", offsets: []int64{1, 2, 3}},
+					{gossipId: "gossip111", key: "k1", messages: []msgLog{{1, 100}, {2, 200}, {3, 300}}},
 				},
 				"n2": {
-					{gossipId: "gossip333", key: "k5", offsets: []int64{4, 5, 6}},
+					{gossipId: "gossip333", key: "k5", messages: []msgLog{{40, 400}, {50, 500}, {60, 600}}},
 				},
 			},
 		},
@@ -462,7 +480,7 @@ func TestAckGossip(t *testing.T) {
 				cmp.Diff(
 					tt.expectedLogs,
 					p.gossiped,
-					cmp.AllowUnexported(gossipLog{}),
+					cmp.AllowUnexported(gossipLog{}, msgLog{}),
 					cmpopts.IgnoreFields(gossipLog{}, "at"),
 				),
 				"Diff between expected and p.gossiped actual",
@@ -477,22 +495,22 @@ func TestFlushGossipBuffer(t *testing.T) {
 		name             string
 		node             string
 		lastFlush        time.Time
-		initialBuffer    map[string]offset_list
+		initialBuffer    map[string]msg_log_list
 		gossiped         map[string][]gossipLog
 		expectedGossiped map[string][]gossipLog
-		expectedBuffer   map[string]offset_list
+		expectedBuffer   map[string]msg_log_list
 		mockNode         *MockNode
 	}{
 		{
 			name:      "Empty buffer",
 			node:      "n1",
 			lastFlush: time.Now().Add(-1 * bufferAge),
-			initialBuffer: map[string]offset_list{
+			initialBuffer: map[string]msg_log_list{
 				"n2": {},
 			},
 			gossiped:         map[string][]gossipLog{},
 			expectedGossiped: map[string][]gossipLog{},
-			expectedBuffer: map[string]offset_list{
+			expectedBuffer: map[string]msg_log_list{
 				"n2": {},
 			},
 			mockNode: NewMockNode("n1"),
@@ -501,18 +519,18 @@ func TestFlushGossipBuffer(t *testing.T) {
 			name:      "Single node, single key",
 			node:      "n1",
 			lastFlush: time.Now().Add(-1 * bufferAge),
-			initialBuffer: map[string]offset_list{
+			initialBuffer: map[string]msg_log_list{
 				"n2": {
-					"k1": {42},
+					"k1": {{42, 1}},
 				},
 			},
 			gossiped: map[string][]gossipLog{},
 			expectedGossiped: map[string][]gossipLog{
 				"n2": {
-					{key: "k1", offsets: []int64{42}},
+					{key: "k1", messages: []msgLog{{42, 1}}},
 				},
 			},
-			expectedBuffer: map[string]offset_list{
+			expectedBuffer: map[string]msg_log_list{
 				"n2": {},
 			},
 			mockNode: NewMockNode("n1"),
@@ -521,20 +539,20 @@ func TestFlushGossipBuffer(t *testing.T) {
 			name:      "Single node, multiple keys",
 			node:      "n1",
 			lastFlush: time.Now().Add(-10 * bufferAge),
-			initialBuffer: map[string]offset_list{
+			initialBuffer: map[string]msg_log_list{
 				"n2": {
-					"k1": {42},
-					"k2": {101},
+					"k1": {{42, 1}},
+					"k2": {{101, 2}},
 				},
 			},
 			gossiped: map[string][]gossipLog{},
 			expectedGossiped: map[string][]gossipLog{
 				"n2": {
-					{key: "k1", offsets: []int64{42}},
-					{key: "k2", offsets: []int64{101}},
+					{key: "k1", messages: []msgLog{{42, 1}}},
+					{key: "k2", messages: []msgLog{{101, 2}}},
 				},
 			},
-			expectedBuffer: map[string]offset_list{
+			expectedBuffer: map[string]msg_log_list{
 				"n2": {},
 			},
 			mockNode: NewMockNode("n1"),
@@ -543,28 +561,28 @@ func TestFlushGossipBuffer(t *testing.T) {
 			name:      "Multiple nodes, multiple keys",
 			node:      "n1",
 			lastFlush: time.Now().Add(-10 * bufferAge), // needs a bit more time
-			initialBuffer: map[string]offset_list{
+			initialBuffer: map[string]msg_log_list{
 				"n2": {
-					"k1": {42, 43},
-					"k2": {101},
+					"k1": []msgLog{{42, 420}, {43, 430}},
+					"k2": []msgLog{{101, 2}},
 				},
 				"n3": {
-					"k1": {42, 44},
-					"k3": {202},
+					"k1": []msgLog{{42, 420}, {44, 440}},
+					"k3": []msgLog{{202, 3}},
 				},
 			},
 			gossiped: map[string][]gossipLog{},
 			expectedGossiped: map[string][]gossipLog{
 				"n2": {
-					{key: "k1", offsets: []int64{42, 43}},
-					{key: "k2", offsets: []int64{101}},
+					{key: "k1", messages: []msgLog{{42, 420}, {43, 430}}},
+					{key: "k2", messages: []msgLog{{101, 2}}},
 				},
 				"n3": {
-					{key: "k1", offsets: []int64{42, 44}},
-					{key: "k3", offsets: []int64{202}},
+					{key: "k1", messages: []msgLog{{42, 420}, {44, 440}}},
+					{key: "k3", messages: []msgLog{{202, 3}}},
 				},
 			},
-			expectedBuffer: map[string]offset_list{
+			expectedBuffer: map[string]msg_log_list{
 				"n2": {},
 				"n3": {},
 			},
@@ -574,16 +592,16 @@ func TestFlushGossipBuffer(t *testing.T) {
 			name:      "No flush",
 			node:      "n1",
 			lastFlush: time.Now(),
-			initialBuffer: map[string]offset_list{
+			initialBuffer: map[string]msg_log_list{
 				"n2": {
-					"k1": {42},
+					"k1": []msgLog{{42, 420}},
 				},
 			},
 			gossiped:         map[string][]gossipLog{},
 			expectedGossiped: map[string][]gossipLog{},
-			expectedBuffer: map[string]offset_list{
+			expectedBuffer: map[string]msg_log_list{
 				"n2": {
-					"k1": {42},
+					"k1": []msgLog{{42, 420}},
 				},
 			},
 			mockNode: NewMockNode("n1"),
@@ -606,7 +624,7 @@ func TestFlushGossipBuffer(t *testing.T) {
 			p.flushGossipBuffer()
 
 			// Assert that the buffer has been updated as expected
-			if !cmp.Equal(p.buffer, tt.expectedBuffer) {
+			if !cmp.Equal(p.buffer, tt.expectedBuffer, cmp.AllowUnexported(gossipLog{}, msgLog{})) {
 				t.Errorf("flushGossipBuffer() buffer mismatch (-want +got):\n%s", cmp.Diff(tt.expectedBuffer, p.buffer))
 			}
 
@@ -625,7 +643,7 @@ func TestFlushGossipBuffer(t *testing.T) {
 					cmp.Diff(
 						eg,
 						p.gossiped[n],
-						cmp.AllowUnexported(gossipLog{}),
+						cmp.AllowUnexported(gossipLog{}, msgLog{}),
 						cmpopts.IgnoreFields(gossipLog{}, "at", "gossipId"),
 					),
 					"Diff between expected and p.gossiped actual",
@@ -674,7 +692,7 @@ func TestResendUnackedGossips(t *testing.T) {
 			node: "n1",
 			gossiped: map[string][]gossipLog{
 				"n2": {
-					{gossipId: "g1", at: old, key: "k1", offsets: []int64{42}},
+					{gossipId: "g1", at: old, key: "k1", messages: []msgLog{{42, 1}}},
 				},
 			},
 			expectedSendCalls: 1,
@@ -685,8 +703,8 @@ func TestResendUnackedGossips(t *testing.T) {
 			node: "n1",
 			gossiped: map[string][]gossipLog{
 				"n2": {
-					{gossipId: "g1", at: old, key: "k1", offsets: []int64{42}},
-					{gossipId: "g2", at: old, key: "k2", offsets: []int64{101}},
+					{gossipId: "g1", at: old, key: "k1", messages: []msgLog{{42, 1}}},
+					{gossipId: "g2", at: old, key: "k2", messages: []msgLog{{101, 1}}},
 				},
 			},
 			expectedSendCalls: 2,
@@ -697,10 +715,10 @@ func TestResendUnackedGossips(t *testing.T) {
 			node: "n1",
 			gossiped: map[string][]gossipLog{
 				"n2": {
-					{gossipId: "g1", at: old, key: "k1", offsets: []int64{42}},
+					{gossipId: "g1", at: old, key: "k1", messages: []msgLog{{42, 1}}},
 				},
 				"n3": {
-					{gossipId: "g2", at: old, key: "k2", offsets: []int64{101}},
+					{gossipId: "g2", at: old, key: "k2", messages: []msgLog{{101, 1}}},
 				},
 			},
 			expectedSendCalls: 2,

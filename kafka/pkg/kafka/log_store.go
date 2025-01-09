@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"maps"
 	"slices"
 	"sync"
 )
@@ -15,6 +16,7 @@ type keyStore struct {
 	committed int64
 	mtx       *sync.RWMutex
 	offsets   []int64
+	messages  map[int64]int64
 }
 
 func NewKeyStore(key string) *keyStore {
@@ -23,22 +25,23 @@ func NewKeyStore(key string) *keyStore {
 		committed: 0,
 		mtx:       &sync.RWMutex{},
 		offsets:   []int64{},
+		messages:  map[int64]int64{},
 	}
 }
 
-func (k *keyStore) store(offset int64) {
+func (k *keyStore) store(offset, msg int64) {
 	k.mtx.Lock()
 	defer k.mtx.Unlock()
 
-	k.offsets = append(k.offsets, offset)
-	slices.Sort(k.offsets)
+	k.messages[offset] = msg
+	k.offsets = slices.Sorted(maps.Keys(k.messages))
 }
 
-func (k *keyStore) getOffsets(offset int64) []int64 {
+func (k *keyStore) getMessages(offset int64) []msgLog {
 	k.mtx.RLock()
 	defer k.mtx.RUnlock()
 
-	res := []int64{}
+	res := []msgLog{}
 	if offset > 0 && contains(k.offsets, offset) == false {
 		return res
 	}
@@ -46,7 +49,7 @@ func (k *keyStore) getOffsets(offset int64) []int64 {
 	curr := offset
 	for _, l := range k.offsets {
 		if l >= offset && l-curr <= 1 {
-			res = append(res, l)
+			res = append(res, msgLog{offset: l, msg: k.messages[l]})
 			curr = l
 		}
 	}

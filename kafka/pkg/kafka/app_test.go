@@ -73,19 +73,18 @@ func TestGetNextOffset(t *testing.T) {
 
 func TestStoreMsg(t *testing.T) {
 	tests := []struct {
-		name            string
-		key             string
-		entry           msgLog
-		initialStorage  map[string]*keyStore
-		expectedOffsets []int64
-		kvWriteError    error
+		name             string
+		key              string
+		entry            msgLog
+		initialStorage   map[string]*keyStore
+		expectedMessages map[int64]int64
 	}{
 		{
-			name:            "new key",
-			key:             "k1",
-			entry:           msgLog{offset: 1, msg: 100},
-			initialStorage:  map[string]*keyStore{},
-			expectedOffsets: []int64{1},
+			name:             "new key",
+			key:              "k1",
+			entry:            msgLog{offset: 1, msg: 100},
+			initialStorage:   map[string]*keyStore{},
+			expectedMessages: map[int64]int64{1: 100},
 		},
 		{
 			name:  "existing key",
@@ -96,18 +95,10 @@ func TestStoreMsg(t *testing.T) {
 					key:       "k1",
 					committed: 0,
 					mtx:       &sync.RWMutex{},
-					offsets:   []int64{1},
+					messages:  map[int64]int64{1: 100},
 				},
 			},
-			expectedOffsets: []int64{1, 2},
-		},
-		{
-			name:            "kv write error",
-			key:             "k1",
-			entry:           msgLog{offset: 1, msg: 100},
-			initialStorage:  map[string]*keyStore{},
-			expectedOffsets: []int64{1}, // offset is still stored locally
-			kvWriteError:    context.Canceled,
+			expectedMessages: map[int64]int64{1: 100, 2: 200},
 		},
 	}
 
@@ -119,28 +110,19 @@ func TestStoreMsg(t *testing.T) {
 			p := New(mockNode, mockLinKV, mockSeqKV)
 
 			p.storage = tt.initialStorage
-			mockLinKV.ReturnWriteError = tt.kvWriteError
 
 			p.storeMsg(tt.key, tt.entry)
 
 			ks, ok := p.storage[tt.key]
-			if !ok && len(tt.expectedOffsets) > 0 {
+			if !ok && len(tt.expectedMessages) > 0 {
 				t.Errorf("key %s not found in storage", tt.key)
 			}
 
 			if ok {
 				ks.mtx.RLock()
-				assert.Equal(t, tt.expectedOffsets, ks.offsets)
+				assert.Equal(t, tt.expectedMessages, ks.messages)
 				ks.mtx.RUnlock()
 			}
-
-			if tt.kvWriteError != nil {
-				assert.Equal(t, formatMsgKey(tt.key, tt.entry.offset), mockSeqKV.LastKey)
-				assert.Equal(t, tt.entry.msg, mockSeqKV.LastValue)
-				assert.Equal(t, 1, mockSeqKV.WriteCalled)
-
-			}
-
 		})
 	}
 }
@@ -270,8 +252,6 @@ func TestHandlePoll(t *testing.T) {
 		name         string
 		body         workload
 		storage      map[string]*keyStore
-		kvReadData   map[string]any
-		kvReadError  error
 		expectedMsgs message_list
 	}{
 		{
@@ -291,10 +271,8 @@ func TestHandlePoll(t *testing.T) {
 					committed: 0,
 					mtx:       &sync.RWMutex{},
 					offsets:   []int64{1},
+					messages:  map[int64]int64{1: 100},
 				},
-			},
-			kvReadData: map[string]any{
-				formatMsgKey("k1", 1): 100,
 			},
 			expectedMsgs: message_list{
 				"k1": []offset_msg_pair{{1, 100}},
@@ -309,11 +287,8 @@ func TestHandlePoll(t *testing.T) {
 					committed: 0,
 					mtx:       &sync.RWMutex{},
 					offsets:   []int64{1, 2, 3},
+					messages:  map[int64]int64{1: 100, 2: 200, 3: 300},
 				},
-			},
-			kvReadData: map[string]any{
-				formatMsgKey("k1", 2): 200,
-				formatMsgKey("k1", 3): 300,
 			},
 			expectedMsgs: message_list{
 				"k1": []offset_msg_pair{{2, 200}, {3, 300}},
@@ -328,17 +303,15 @@ func TestHandlePoll(t *testing.T) {
 					committed: 0,
 					mtx:       &sync.RWMutex{},
 					offsets:   []int64{1},
+					messages:  map[int64]int64{1: 100},
 				},
 				"k2": {
 					key:       "k2",
 					committed: 0,
 					mtx:       &sync.RWMutex{},
 					offsets:   []int64{2},
+					messages:  map[int64]int64{2: 200},
 				},
-			},
-			kvReadData: map[string]any{
-				formatMsgKey("k1", 1): 100,
-				formatMsgKey("k2", 2): 200,
 			},
 			expectedMsgs: message_list{
 				"k1": []offset_msg_pair{{1, 100}},
@@ -346,46 +319,28 @@ func TestHandlePoll(t *testing.T) {
 			},
 		},
 		{
-			name: "kv read error",
-			body: workload{Offsets: map[string]int64{"k1": 0}},
-			storage: map[string]*keyStore{
-				"k1": {
-					key:       "k1",
-					committed: 0,
-					mtx:       &sync.RWMutex{},
-					offsets:   []int64{1},
-				},
-			},
-			kvReadError:  maelstrom.NewRPCError(maelstrom.KeyDoesNotExist, "Read error"),
-			expectedMsgs: message_list{"k1": []offset_msg_pair{}},
-		},
-		{
 			name: "many multiple keys very long",
 			body: workload{Offsets: map[string]int64{"k1": 3, "k2": 22, "k3": 50}},
 			storage: map[string]*keyStore{
 				"k1": {
-					key:     "k1",
-					mtx:     &sync.RWMutex{},
-					offsets: getOffsets(1, 16),
+					key:      "k1",
+					mtx:      &sync.RWMutex{},
+					offsets:  getOffsets(1, 16),
+					messages: getMessageMap(1, 16),
 				},
 				"k2": {
-					key:     "k2",
-					mtx:     &sync.RWMutex{},
-					offsets: getOffsets(10, 40),
+					key:      "k2",
+					mtx:      &sync.RWMutex{},
+					offsets:  getOffsets(10, 40),
+					messages: getMessageMap(10, 40),
 				},
 				"k3": {
-					key:     "k3",
-					mtx:     &sync.RWMutex{},
-					offsets: getOffsets(1, 100),
+					key:      "k3",
+					mtx:      &sync.RWMutex{},
+					offsets:  getOffsets(1, 100),
+					messages: getMessageMap(1, 100),
 				},
 			},
-			kvReadData: func() map[string]any {
-				data := make(map[string]any)
-				getKvReadData(&data, "k1", 1, 16)
-				getKvReadData(&data, "k2", 10, 40)
-				getKvReadData(&data, "k3", 1, 100)
-				return data
-			}(),
 			expectedMsgs: message_list{
 				"k1": getMessages(3, 3+MAX_POLL_LIST_LENGTH),
 				"k2": getMessages(22, 22+MAX_POLL_LIST_LENGTH),
@@ -398,8 +353,6 @@ func TestHandlePoll(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockLinKV := NewMockKV()
 			mockSeqKV := NewMockKV()
-			mockSeqKV.ReturnValues = tt.kvReadData
-			mockSeqKV.ReturnReadError = tt.kvReadError
 
 			mockNode := NewMockNode("n1")
 			p := New(mockNode, mockLinKV, mockSeqKV)
@@ -622,10 +575,12 @@ func getOffsets(start, end int) []int64 {
 	return data
 }
 
-func getKvReadData(data *map[string]any, key string, start, end int) {
+func getMessageMap(start, end int) map[int64]int64 {
+	data := make(map[int64]int64, end-start)
 	for i := start; i <= end; i++ {
-		(*data)[formatMsgKey(key, int64(i))] = int(i + 100)
+		data[int64(i)] = int64(i) + 100
 	}
+	return data
 }
 
 func getMessages(start, end int) []offset_msg_pair {

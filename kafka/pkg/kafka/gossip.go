@@ -1,7 +1,6 @@
 package kafka
 
 import (
-	"log"
 	"time"
 
 	uuid "github.com/google/uuid"
@@ -12,7 +11,7 @@ type gossipLog struct {
 	at       int64
 	gossipId string
 	key      string
-	offsets  []int64
+	messages []msgLog
 }
 
 type receiveGossipResponse struct {
@@ -21,15 +20,15 @@ type receiveGossipResponse struct {
 }
 
 type sendGossipBody struct {
-	Type          string  `json:"type"`
-	GossipId      string  `json:"gossip_id"`
-	Key           string  `json:"key"`
-	GossipOffsets []int64 `json:"gossip_offsets"`
+	Type           string   `json:"type"`
+	GossipId       string   `json:"gossip_id"`
+	Key            string   `json:"key"`
+	GossipMessages []msgLog `json:"gossip_messages"`
 }
 
 const bufferAge time.Duration = time.Millisecond * 200
 
-func (p *Program) gossip(src, key string, offset int64) {
+func (p *Program) gossip(src, key string, msg msgLog) {
 	targets := p.topo
 	for _, t := range targets {
 		if t == src || t == p.node.ID() { // breaking gossip loop
@@ -38,14 +37,14 @@ func (p *Program) gossip(src, key string, offset int64) {
 		// log.Printf("gossip: from %s to %s for %s: %+v", src, t, key, offset)
 		p.bufMtx.Lock()
 		if _, ok := p.buffer[t]; !ok {
-			p.buffer[t] = map[string][]int64{}
+			p.buffer[t] = map[string][]msgLog{}
 		}
-		p.buffer[t][key] = append(p.buffer[t][key], offset)
+		p.buffer[t][key] = append(p.buffer[t][key], msg)
 		p.bufMtx.Unlock()
 	}
 }
 
-func (p *Program) addGossipLog(node, id, key string, offsets []int64) {
+func (p *Program) addGossipLog(node, id, key string, messages []msgLog) {
 	p.ackMtx.Lock()
 	defer p.ackMtx.Unlock()
 
@@ -58,7 +57,7 @@ func (p *Program) addGossipLog(node, id, key string, offsets []int64) {
 			at:       time.Now().UnixMicro(),
 			gossipId: id,
 			key:      key,
-			offsets:  offsets,
+			messages: messages,
 		},
 	)
 }
@@ -83,13 +82,12 @@ func (p *Program) receiveGossip(body workload, msg maelstrom.Message) receiveGos
 		GossipId: body.GossipId,
 	}
 
-	for _, o := range body.GossipOffsets {
-		if p.processMsg(key, o) { // gossip it around if it is unseen
-			p.gossip(msg.Src, key, o)
+	for _, m := range body.GossipMessages {
+		if p.processMsg(key, m) { // gossip it around if it is unseen
+			p.gossip(msg.Src, key, m)
 		}
 	}
-	ks := p.getKeyStore(key)
-	log.Printf("receiveGossip: local keystore for %s looks like %+v", key, ks)
+	// log.Printf("receiveGossip: local keystore for %s looks like %+v", key, p.getKeyStore(key))
 
 	return resp
 }
@@ -105,18 +103,18 @@ func (p *Program) flushGossipBuffer() {
 			if len(ml) == 0 {
 				continue
 			}
-			for key, offsetList := range ml {
+			for key, msgList := range ml {
 				gid := uuid.NewString()
 				p.node.Send(t, sendGossipBody{
-					Type:          "gossip",
-					GossipId:      gid,
-					Key:           key,
-					GossipOffsets: offsetList,
+					Type:           "gossip",
+					GossipId:       gid,
+					Key:            key,
+					GossipMessages: msgList,
 				})
-				p.addGossipLog(t, gid, key, offsetList)
+				p.addGossipLog(t, gid, key, msgList)
 				delete(p.buffer[t], key)
 			}
-			p.buffer[t] = make(map[string][]int64)
+			p.buffer[t] = make(map[string][]msgLog)
 		}
 		p.lastFlush = time.Now()
 	}
@@ -133,10 +131,10 @@ func (p *Program) resendUnackedGossips() {
 			if time.Since(time.UnixMicro(l.at)) >= time.Second {
 				// log.Printf("resendUnackedGossips: resending gossip batch to %s (%s): %+v", n, l.gossipId, l.offsets)
 				p.node.Send(n, sendGossipBody{
-					Type:          "gossip",
-					GossipId:      l.gossipId,
-					Key:           l.key,
-					GossipOffsets: l.offsets,
+					Type:           "gossip",
+					GossipId:       l.gossipId,
+					Key:            l.key,
+					GossipMessages: l.messages,
 				})
 			}
 		}
@@ -144,13 +142,13 @@ func (p *Program) resendUnackedGossips() {
 	p.ackMtx.Unlock()
 }
 
-func (p *Program) processMsg(key string, offset int64) bool {
+func (p *Program) processMsg(key string, msg msgLog) bool {
 	ks := p.getKeyStore(key)
 
-	if contains(ks.offsets, offset) {
+	if contains(ks.offsets, msg.offset) {
 		return false
 	}
-	ks.store(offset)
+	ks.store(msg.offset, msg.msg)
 	// log.Printf("processMsg: storing %d for %s through gossip %+v", offset, key, ks)
 
 	return true

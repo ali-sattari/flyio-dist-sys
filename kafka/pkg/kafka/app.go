@@ -22,7 +22,7 @@ type Program struct {
 	topo      []string
 	gossiped  map[string][]gossipLog
 	ackMtx    *sync.Mutex
-	buffer    map[string]offset_list
+	buffer    map[string]msg_log_list
 	bufMtx    *sync.Mutex
 	lastFlush time.Time
 	flushMtx  *sync.Mutex
@@ -30,20 +30,21 @@ type Program struct {
 
 type workload struct {
 	maelstrom.MessageBody
-	Type          string           `json:"type"`
-	Key           string           `json:"key,omitempty"`
-	Keys          []string         `json:"keys,omitempty"`
-	Msg           int64            `json:"msg,omitempty"`
-	Offset        int64            `json:"offset,omitempty"`
-	Offsets       map[string]int64 `json:"offsets,omitempty"`
-	GossipId      string           `json:"gossip_id,omitempty"`
-	GossipOffsets []int64          `json:"gossip_offsets,omitempty"`
+	Type           string           `json:"type"`
+	Key            string           `json:"key,omitempty"`
+	Keys           []string         `json:"keys,omitempty"`
+	Msg            int64            `json:"msg,omitempty"`
+	Offset         int64            `json:"offset,omitempty"`
+	Offsets        map[string]int64 `json:"offsets,omitempty"`
+	GossipId       string           `json:"gossip_id,omitempty"`
+	GossipMessages []msgLog         `json:"gossip_messages,omitempty"`
 }
 
 type offset_msg_pair [2]int64
 type key_offset_pair map[string]int64
 type message_list map[string][]offset_msg_pair
 type offset_list map[string][]int64
+type msg_log_list map[string][]msgLog
 
 type baseResponse struct {
 	Type string `json:"type"`
@@ -79,7 +80,7 @@ func New(n NodeInterface, linKv, seqKv KVInterface) Program {
 		topo:        []string{},
 		gossiped:    map[string][]gossipLog{},
 		ackMtx:      &sync.Mutex{},
-		buffer:      map[string]offset_list{},
+		buffer:      map[string]msg_log_list{},
 		bufMtx:      &sync.Mutex{},
 		flushMtx:    &sync.Mutex{},
 	}
@@ -110,7 +111,7 @@ func (p *Program) GetHandle(rpc_type string) maelstrom.HandlerFunc {
 			resp = p.handleInit()
 		case "send":
 			resp = p.handleSend(body)
-			p.gossip(msg.Src, body.Key, resp.(sendResponse).Offset)
+			p.gossip(msg.Src, body.Key, msgLog{offset: resp.(sendResponse).Offset, msg: body.Msg})
 		case "poll":
 			resp = p.handlePoll(body)
 		case "commit_offsets":
@@ -135,7 +136,7 @@ func (p *Program) handleInit() baseResponse {
 			p.topo = append(p.topo, n)
 		}
 	}
-	log.Printf("handleInit: topology for %s updated to: %+v", p.node.ID(), p.topo)
+	// log.Printf("handleInit: topology for %s updated to: %+v", p.node.ID(), p.topo)
 	return baseResponse{Type: "init_ok"}
 }
 
@@ -155,12 +156,7 @@ func (p *Program) handleSend(body workload) sendResponse {
 
 func (p *Program) storeMsg(key string, entry msgLog) {
 	ks := p.getKeyStore(key)
-
-	ks.store(entry.offset)
-	err := p.seqKv.Write(context.Background(), formatMsgKey(key, entry.offset), entry.msg)
-	if err != nil {
-		log.Printf("storeMsg: error storing in KV %+v", err)
-	}
+	ks.store(entry.offset, entry.msg)
 }
 
 func (p *Program) getNextOffset(key string) int64 {
@@ -188,26 +184,25 @@ func (p *Program) handlePoll(body workload) pollResponse {
 	logs := message_list{}
 	for k, o := range body.Offsets {
 		ks := p.getKeyStore(k)
-		ol := ks.getOffsets(o)
 		logs[k] = []offset_msg_pair{}
 		count := 0
 		// log.Printf("handlePoll key offsets: %+v", ol)
-		for _, offset := range ol {
+		for _, m := range ks.getMessages(o) {
 			if count == MAX_POLL_LIST_LENGTH {
 				break
 			}
-			val, err := p.seqKv.ReadInt(context.Background(), formatMsgKey(k, offset))
+			// val, err := p.seqKv.ReadInt(context.Background(), formatMsgKey(k, msg.offset))
 			// log.Printf("handlePoll: ReaInt for %s:%d -> %+v", k, offset, val)
-			if err != nil {
-				switch e := err.(type) {
-				case *maelstrom.RPCError:
-					if e.Code == maelstrom.KeyDoesNotExist {
-						log.Printf("handlePoll: KeyDoesNotExist on ReaInt for %s:%d", k, offset)
-						continue
-					}
-				}
-			}
-			logs[k] = append(logs[k], [2]int64{offset, int64(val)})
+			// if err != nil {
+			// 	switch e := err.(type) {
+			// 	case *maelstrom.RPCError:
+			// 		if e.Code == maelstrom.KeyDoesNotExist {
+			// 			log.Printf("handlePoll: KeyDoesNotExist on ReaInt for %s:%d", k, msg.offset)
+			// 			continue
+			// 		}
+			// 	}
+			// }
+			logs[k] = append(logs[k], [2]int64{m.offset, m.msg})
 			count++
 		}
 
@@ -233,17 +228,6 @@ func (p *Program) handleCommitOffsets(body workload) baseResponse {
 		}
 
 		_ = p.linKv.CompareAndSwap(context.Background(), formatCommittedOffsetKey(k), curr, o, true)
-		// err := p.linKv.CompareAndSwap(context.Background(), formatCommittedOffsetKey(k), curr, o, true)
-		// if err != nil {
-		// 	switch e := err.(type) {
-		// 	case *maelstrom.RPCError:
-		// 		if e.Code == maelstrom.PreconditionFailed {
-		// 			log.Printf("handleCommitOffsets: PreconditionFailed error for key %+v: %s", k, err)
-		// 		}
-		// 	default:
-		// 		log.Printf("handleCommitOffsets: error for key %+v: %s", k, err)
-		// 	}
-		// }
 	}
 	return resp
 }

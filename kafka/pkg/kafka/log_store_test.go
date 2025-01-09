@@ -1,6 +1,8 @@
 package kafka
 
 import (
+	"maps"
+	"slices"
 	"sync"
 	"testing"
 
@@ -10,65 +12,82 @@ import (
 func TestKeyStore(t *testing.T) {
 	tests := []struct {
 		name            string
-		initial         []int64
+		initialMessages map[int64]int64
 		committed       int64
-		writeOffsets    []int64 // Offsets to write during the test
-		readOffset      int64   // Offset to read from
-		expectRead      []int64 // Expected result from `read`
-		commit          int64   // Offset to commit during the test
-		expectCommitted int64   // Expected committed offset after commit
+		writeMessages   []msgLog // Messages to write during the test
+		readOffset      int64    // Offset to read from
+		expectRead      []msgLog // Expected result from `getMessages`
+		commit          int64    // Offset to commit during the test
+		expectCommitted int64    // Expected committed offset after commit
 	}{
 		{
 			name:            "Empty store read",
-			initial:         nil,
-			writeOffsets:    nil,
+			initialMessages: nil,
+			writeMessages:   nil,
 			readOffset:      1,
-			expectRead:      []int64{},
+			expectRead:      []msgLog{},
 			commit:          0,
 			expectCommitted: 0,
 		},
 		{
 			name:            "Read from offset 2",
-			initial:         []int64{1, 2, 3},
-			writeOffsets:    nil,
+			initialMessages: map[int64]int64{1: 10, 2: 20, 3: 30},
+			writeMessages:   nil,
 			readOffset:      2,
-			expectRead:      []int64{2, 3},
+			expectRead: []msgLog{
+				{offset: 2, msg: 20},
+				{offset: 3, msg: 30},
+			},
 			commit:          2,
 			expectCommitted: 2,
 		},
 		{
 			name:            "Write and read from offset 3",
-			initial:         []int64{1},
-			writeOffsets:    []int64{2, 3},
-			readOffset:      3,
-			expectRead:      []int64{3},
+			initialMessages: map[int64]int64{1: 10},
+			writeMessages: []msgLog{
+				{offset: 2, msg: 20},
+				{offset: 3, msg: 30},
+			},
+			readOffset: 3,
+			expectRead: []msgLog{
+				{offset: 3, msg: 30},
+			},
 			commit:          3,
 			expectCommitted: 3,
 		},
 		{
 			name:            "Read monotonous offsets only",
-			initial:         []int64{1, 2, 3, 4, 7, 8, 9},
-			writeOffsets:    []int64{},
+			initialMessages: map[int64]int64{1: 10, 2: 20, 3: 30, 4: 40, 7: 70, 8: 80, 9: 90},
+			writeMessages:   []msgLog{},
 			readOffset:      2,
-			expectRead:      []int64{2, 3, 4},
+			expectRead: []msgLog{
+				{offset: 2, msg: 20},
+				{offset: 3, msg: 30},
+				{offset: 4, msg: 40},
+			},
 			commit:          3,
 			expectCommitted: 3,
 		},
 		{
 			name:            "Read monotonous offsets missing asked offset",
-			initial:         []int64{1, 2, 3, 4, 7, 8, 9},
-			writeOffsets:    []int64{},
+			initialMessages: map[int64]int64{1: 10, 2: 20, 3: 30, 4: 40, 7: 70, 8: 80, 9: 90},
+			writeMessages:   []msgLog{},
 			readOffset:      6,
-			expectRead:      []int64{},
+			expectRead:      []msgLog{},
 			commit:          3,
 			expectCommitted: 3,
 		},
 		{
 			name:            "Read monotonous offsets having asked offset",
-			initial:         []int64{1, 2, 3, 4, 6, 7, 8, 9},
-			writeOffsets:    []int64{},
+			initialMessages: map[int64]int64{1: 10, 2: 20, 3: 30, 4: 40, 6: 60, 7: 70, 8: 80, 9: 90},
+			writeMessages:   []msgLog{},
 			readOffset:      6,
-			expectRead:      []int64{6, 7, 8, 9},
+			expectRead: []msgLog{
+				{offset: 6, msg: 60},
+				{offset: 7, msg: 70},
+				{offset: 8, msg: 80},
+				{offset: 9, msg: 90},
+			},
 			commit:          3,
 			expectCommitted: 3,
 		},
@@ -76,22 +95,22 @@ func TestKeyStore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+
 			store := keyStore{
 				key:       "testkey",
 				committed: tt.committed,
-				offsets:   tt.initial,
+				offsets:   slices.Sorted(maps.Keys(tt.initialMessages)),
+				messages:  tt.initialMessages,
 				mtx:       &sync.RWMutex{},
 			}
 
-			for _, o := range tt.writeOffsets {
-				store.store(o)
+			for _, o := range tt.writeMessages {
+				store.store(o.offset, o.msg)
 			}
 			// t.Logf("logs %+v", store)
 
-			var got []int64
-			got = store.getOffsets(tt.readOffset)
-
-			assert.Equal(t, tt.expectRead, got, "offsets should match")
+			got := store.getMessages(tt.readOffset)
+			assert.Equal(t, tt.expectRead, got, "messages should match")
 
 			store.commitOffset(tt.commit)
 			assert.Equal(t, tt.expectCommitted, store.getCommittedOffset(), "committed offset should match")

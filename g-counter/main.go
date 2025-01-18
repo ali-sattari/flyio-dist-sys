@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -37,7 +38,7 @@ func main() {
 	n.Handle("read", goc.GetHandle("read"))
 
 	if err := n.Run(); err != nil {
-		logger.Error("main: %s", err)
+		logger.Error("main", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 

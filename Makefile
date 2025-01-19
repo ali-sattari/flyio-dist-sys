@@ -53,7 +53,7 @@ endif
 ## kafka log
 ifeq ($(CHALLENGE),kafka)
 ifeq ($(SUB),)
-	$(error "SUB is required. Usage: make run CHALLENGE=broadcast SUB=3a")
+	$(error "SUB is required. Usage: make run CHALLENGE=kafkla SUB=5a")
 endif
 ## kafka log -> 5a: single-node
 ifeq ($(SUB),5a)
@@ -62,6 +62,17 @@ else ifeq ($(SUB),5b)
 	$(BASE_CMD) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000;
 else ifeq ($(SUB),5c)
 	$(BASE_CMD) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000;
+else
+	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
+endif
+## txn-rw-register log
+ifeq ($(CHALLENGE),txn-rw-register)
+ifeq ($(SUB),)
+	$(error "SUB is required. Usage: make run CHALLENGE=txn-rw-register SUB=6a")
+endif
+## txn-rw-register log -> 6a: single-node
+ifeq ($(SUB),56a)
+	$(BASE_CMD) --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total;
 else
 	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
 endif

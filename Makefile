@@ -65,13 +65,14 @@ else ifeq ($(SUB),5c)
 else
 	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"
 endif
-## txn-rw-register log
+endif
+## txn-rw-register
 ifeq ($(CHALLENGE),txn-rw-register)
 ifeq ($(SUB),)
 	$(error "SUB is required. Usage: make run CHALLENGE=txn-rw-register SUB=6a")
 endif
-## txn-rw-register log -> 6a: single-node
-ifeq ($(SUB),56a)
+## txn-rw-register -> 6a: single-node
+ifeq ($(SUB),6a)
 	$(BASE_CMD) --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total;
 else
 	@echo "Unknown sub-challenge for $(CHALLENGE): $(SUB)"

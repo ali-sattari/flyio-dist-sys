@@ -9,11 +9,13 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"main/pkg/txn"
 
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/contrib/instrumentation/runtime"
 )
 
 //go:embed .env
@@ -24,6 +26,7 @@ var wg sync.WaitGroup
 func main() {
 	load_env()
 
+	// observability
 	ctx := context.Background()
 	tracerCleanup := initTracer()
 	defer tracerCleanup(ctx)
@@ -31,16 +34,23 @@ func main() {
 	loggerCleanup := initLogger()
 	defer loggerCleanup(ctx)
 
+	metricCleanup := initMetric()
+	defer metricCleanup(ctx)
+
+	runtime.Start(runtime.WithMinimumReadMemStatsInterval(time.Second))
+
 	logger := otelslog.NewLogger(serviceName)
 
+	// new app
 	n := txn.NewWrappedNode()
-	app := txn.New(n, txn.NewWrappedKV(n, "linear"), logger)
+	app := txn.New(n, logger)
 
-	rpcs := []string{"init", "txn", "txn_ok"}
+	rpcs := []string{"init", "txn"}
 	for _, r := range rpcs {
 		n.Handle(r, app.GetHandle(r))
 	}
 
+	// run & cleanup
 	if err := n.Run(); err != nil {
 		log.Printf("ERROR: %s", err)
 		os.Exit(1)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 
+	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -10,12 +11,13 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 var (
-	serviceName = "g-counter"
+	serviceName = "txn"
 )
 
 func initTracer() func(context.Context) error {
@@ -26,19 +28,11 @@ func initTracer() func(context.Context) error {
 		otlptracehttp.NewClient(),
 	)
 
-	resources, _ := resource.New(
-		ctx,
-		resource.WithAttributes(
-			attribute.String("service.name", serviceName),
-			attribute.String("library.language", "go"),
-		),
-	)
-
 	otel.SetTracerProvider(
 		sdktrace.NewTracerProvider(
 			sdktrace.WithSampler(sdktrace.AlwaysSample()),
 			sdktrace.WithBatcher(exporter),
-			sdktrace.WithResource(resources),
+			sdktrace.WithResource(getResource(ctx)),
 		),
 	)
 
@@ -49,16 +43,41 @@ func initLogger() func(context.Context) error {
 	ctx := context.Background()
 	logExporter, _ := otlploghttp.New(ctx)
 
-	// logExporter, _ := stdoutlog.New()
-
 	lp := log.NewLoggerProvider(
 		log.WithProcessor(
 			log.NewSimpleProcessor(logExporter),
-			// log.NewBatchProcessor(logExporter),
 		),
+		log.WithResource(getResource(ctx)),
 	)
 
 	global.SetLoggerProvider(lp)
 
 	return lp.Shutdown
+}
+
+func initMetric() func(context.Context) error {
+	ctx := context.Background()
+
+	reader := metric.NewManualReader(
+		metric.WithProducer(runtime.NewProducer()),
+	)
+	provider := metric.NewMeterProvider(
+		metric.WithReader(reader),
+		metric.WithResource(getResource(ctx)),
+	)
+
+	otel.SetMeterProvider(provider)
+
+	return provider.Shutdown
+}
+
+func getResource(ctx context.Context) *resource.Resource {
+	resources, _ := resource.New(
+		ctx,
+		resource.WithAttributes(
+			attribute.String("service.name", serviceName),
+			attribute.String("library.language", "go"),
+		),
+	)
+	return resources
 }

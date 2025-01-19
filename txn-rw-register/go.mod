@@ -4,10 +4,12 @@ go 1.23.3
 
 require (
 	github.com/joho/godotenv v1.5.1
+	go.opentelemetry.io/contrib/instrumentation/runtime v0.59.0
 	go.opentelemetry.io/otel v1.34.0
 	go.opentelemetry.io/otel/log v0.10.0
 	go.opentelemetry.io/otel/sdk v1.34.0
 	go.opentelemetry.io/otel/sdk/log v0.10.0
+	go.opentelemetry.io/otel/sdk/metric v1.34.0
 )
 
 require (

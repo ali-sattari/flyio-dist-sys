@@ -34,6 +34,7 @@ func main() {
 	logger := otelslog.NewLogger(serviceName)
 
 	goc := New(n, kv, logger)
+	n.Handle("init", goc.GetHandle("init"))
 	n.Handle("add", goc.GetHandle("add"))
 	n.Handle("read", goc.GetHandle("read"))
 
